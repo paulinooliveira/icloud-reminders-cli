@@ -4,6 +4,9 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"icloud-reminders/internal/writer"
+	"icloud-reminders/pkg/models"
 )
 
 var (
@@ -11,6 +14,8 @@ var (
 	editDue      string
 	editNotes    string
 	editPriority string
+	clearDue     bool
+	clearNotes   bool
 )
 
 var editCmd = &cobra.Command{
@@ -25,13 +30,46 @@ Examples:
   reminders edit ABC123 --title "New title"
   reminders edit ABC123 --due 2026-03-01 --priority high
   reminders edit ABC123 --notes "Updated notes"
+  reminders edit ABC123 --clear-notes
+  reminders edit ABC123 --clear-due
   reminders edit ABC123 --priority none`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if clearDue && cmd.Flags().Changed("due") {
+			return fmt.Errorf("use either --due or --clear-due, not both")
+		}
+		if clearNotes && cmd.Flags().Changed("notes") {
+			return fmt.Errorf("use either --notes or --clear-notes, not both")
+		}
 		if err := syncEngine.Sync(false); err != nil {
 			return err
 		}
-		result, err := w.EditReminder(args[0], editTitle, editDue, editNotes, editPriority)
+		changes := writer.ReminderChanges{}
+		if cmd.Flags().Changed("title") {
+			changes.Title = &editTitle
+		}
+		if cmd.Flags().Changed("due") {
+			changes.DueDate = &editDue
+		}
+		if clearDue {
+			empty := ""
+			changes.DueDate = &empty
+		}
+		if cmd.Flags().Changed("notes") {
+			changes.Notes = &editNotes
+		}
+		if clearNotes {
+			empty := ""
+			changes.Notes = &empty
+		}
+		if cmd.Flags().Changed("priority") {
+			priorityVal, ok := models.PriorityMap[editPriority]
+			if !ok {
+				return fmt.Errorf("invalid priority %q (use: high, medium, low, none)", editPriority)
+			}
+			changes.Priority = &priorityVal
+		}
+		result, err := w.EditReminder(args[0], changes)
 		if err != nil {
 			return err
 		}
@@ -48,4 +86,6 @@ func init() {
 	editCmd.Flags().StringVarP(&editDue, "due", "d", "", "New due date (YYYY-MM-DD)")
 	editCmd.Flags().StringVarP(&editNotes, "notes", "n", "", "New notes")
 	editCmd.Flags().StringVarP(&editPriority, "priority", "p", "", "New priority (high, medium, low, none)")
+	editCmd.Flags().BoolVar(&clearDue, "clear-due", false, "Clear the due date")
+	editCmd.Flags().BoolVar(&clearNotes, "clear-notes", false, "Clear the notes")
 }

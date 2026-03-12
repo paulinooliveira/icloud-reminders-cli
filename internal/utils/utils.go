@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"regexp"
@@ -155,6 +156,9 @@ func ExtractTitle(tdB64 string) string {
 		if err != nil {
 			return ""
 		}
+		if extracted := extractDocumentText(dec); extracted != "" {
+			return extracted
+		}
 		text = string(dec)
 	} else {
 		// Try plain UTF-8
@@ -174,6 +178,61 @@ func ExtractTitle(tdB64 string) string {
 		}
 	}
 	return ""
+}
+
+func extractDocumentText(buf []byte) string {
+	docs, err := extractLengthDelimitedField(buf, 2)
+	if err != nil || len(docs) == 0 {
+		return ""
+	}
+	notes, err := extractLengthDelimitedField(docs[0], 3)
+	if err != nil || len(notes) == 0 {
+		return ""
+	}
+	texts, err := extractLengthDelimitedField(notes[0], 2)
+	if err != nil || len(texts) == 0 {
+		return ""
+	}
+	return string(texts[0])
+}
+
+func extractLengthDelimitedField(buf []byte, targetField int) ([][]byte, error) {
+	var out [][]byte
+	for pos := 0; pos < len(buf); {
+		tag, n := binary.Uvarint(buf[pos:])
+		if n <= 0 {
+			return nil, fmt.Errorf("invalid varint tag")
+		}
+		pos += n
+		fieldNum := int(tag >> 3)
+		wireType := int(tag & 0x7)
+
+		switch wireType {
+		case 0:
+			_, n = binary.Uvarint(buf[pos:])
+			if n <= 0 {
+				return nil, fmt.Errorf("invalid varint value")
+			}
+			pos += n
+		case 2:
+			length, n := binary.Uvarint(buf[pos:])
+			if n <= 0 {
+				return nil, fmt.Errorf("invalid length-delimited size")
+			}
+			pos += n
+			end := pos + int(length)
+			if end > len(buf) {
+				return nil, fmt.Errorf("length-delimited field exceeds buffer")
+			}
+			if fieldNum == targetField {
+				out = append(out, buf[pos:end])
+			}
+			pos = end
+		default:
+			return nil, fmt.Errorf("unsupported wire type %d", wireType)
+		}
+	}
+	return out, nil
 }
 
 // TsToStr converts a millisecond timestamp to YYYY-MM-DD string.
