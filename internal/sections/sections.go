@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // MembershipFile is the serialized list-level section membership payload.
@@ -172,4 +174,102 @@ func RemoveMemberships(mf *MembershipFile, reminderIDs []string) {
 		filtered = append(filtered, membership)
 	}
 	mf.Memberships = filtered
+}
+
+// RemoveSection removes all memberships for a given section ID and returns the
+// removed member IDs.
+func RemoveSection(mf *MembershipFile, sectionID string) []string {
+	if mf == nil {
+		return nil
+	}
+	filtered := make([]Membership, 0, len(mf.Memberships))
+	var removed []string
+	for _, membership := range mf.Memberships {
+		if membership.GroupID == sectionID {
+			removed = append(removed, membership.MemberID)
+			continue
+		}
+		filtered = append(filtered, membership)
+	}
+	mf.Memberships = filtered
+	sort.Strings(removed)
+	return removed
+}
+
+// CanonicalName returns a stable kebab-case-like section identifier.
+func CanonicalName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+			lastDash = false
+		case r == '&':
+			if b.Len() > 0 && !lastDash {
+				b.WriteByte('-')
+			}
+			b.WriteString("and")
+			b.WriteByte('-')
+			lastDash = true
+		default:
+			if b.Len() > 0 && !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "section"
+	}
+	return out
+}
+
+// ResolutionTokenMapJSON creates the minimal CRDT metadata Apple expects on
+// section records.
+func ResolutionTokenMapJSON(nowMillis int64, replicaID string, includeCanonical bool) string {
+	modificationTime := float64(nowMillis)/1000 - 978307200
+	entry := func(counter int) map[string]interface{} {
+		return map[string]interface{}{
+			"modificationTime": modificationTime,
+			"replicaID":        replicaID,
+			"counter":          counter,
+		}
+	}
+
+	m := map[string]interface{}{
+		"minimumSupportedVersion": entry(1),
+		"list":                    entry(1),
+		"displayName":             entry(1),
+		"creationDate":            entry(1),
+	}
+	if includeCanonical {
+		m["canonicalName"] = entry(1)
+	}
+
+	payload := map[string]interface{}{
+		"map": m,
+	}
+	raw, _ := json.Marshal(payload)
+	return string(raw)
+}
+
+// DeterministicReplicaID returns a UUID-like uppercase identifier derived from
+// the provided section ID. This avoids extra random bookkeeping in the CLI.
+func DeterministicReplicaID(sectionID string) string {
+	id := strings.ToUpper(strings.TrimPrefix(sectionID, "ListSection/"))
+	if len(id) == 36 && strings.Count(id, "-") == 4 {
+		return id
+	}
+	if len(id) >= 32 {
+		return id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:32]
+	}
+	return "SECTION-" + strconv.FormatInt(int64(len(id)), 10)
 }

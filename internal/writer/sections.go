@@ -5,8 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"icloud-reminders/internal/cache"
 	"icloud-reminders/internal/cloudkit"
 	"icloud-reminders/internal/sections"
+	"icloud-reminders/internal/utils"
 )
 
 func (w *Writer) AssignReminderToSection(reminderHint, listHint, sectionHint string) (map[string]interface{}, error) {
@@ -85,6 +87,172 @@ func (w *Writer) AssignReminderIDsToSection(listID, sectionHint string, reminder
 		ids = append(ids, shortID(reminderID))
 	}
 	return w.applySectionMembership(ownerID, listID, sectionID, ids, false)
+}
+
+func (w *Writer) EnsureSection(listHint, name string) (map[string]interface{}, error) {
+	if strings.TrimSpace(name) == "" {
+		return errResult(fmt.Errorf("section name cannot be empty")), nil
+	}
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return errResult(err), nil
+	}
+	listID, err := w.resolveListRef(listHint, "")
+	if err != nil {
+		return errResult(err), nil
+	}
+
+	if sectionID, sectionName, err := w.resolveSectionRef(ownerID, listID, name); err == nil {
+		return map[string]interface{}{
+			"existing":   true,
+			"section_id": sections.ListSectionRecordName(sectionID),
+			"list_id":    listID,
+			"name":       sectionName,
+		}, nil
+	}
+
+	sectionName := strings.TrimSpace(name)
+	recordName := sections.ListSectionRecordName(strings.ToUpper(utils.NewUUIDString()))
+	op := buildCreateSectionOp(ownerID, listID, recordName, sectionName)
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
+	if err != nil {
+		return errResult(err), nil
+	}
+	canonical := sections.CanonicalName(sectionName)
+	w.Sync.Cache.Sections[recordName] = &cache.SectionData{
+		Name:          sectionName,
+		CanonicalName: &canonical,
+		ListRef:       &listID,
+	}
+	if err := w.Sync.Cache.Save(); err != nil {
+		// non-fatal
+	}
+	return map[string]interface{}{
+		"section_id": recordName,
+		"list_id":    listID,
+		"name":       sectionName,
+		"records":    result["records"],
+	}, nil
+}
+
+func (w *Writer) RenameSection(listHint, sectionHint, newName string) (map[string]interface{}, error) {
+	if strings.TrimSpace(newName) == "" {
+		return errResult(fmt.Errorf("new section name cannot be empty")), nil
+	}
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return errResult(err), nil
+	}
+	listID, err := w.resolveListRef(listHint, "")
+	if err != nil {
+		return errResult(err), nil
+	}
+
+	recordName, record, err := w.lookupSectionRecord(ownerID, listID, sectionHint)
+	if err != nil {
+		return errResult(err), nil
+	}
+	changeTag, _ := record["recordChangeTag"].(string)
+	if changeTag == "" {
+		return errResult(fmt.Errorf("section %s missing change tag", recordName)), nil
+	}
+
+	fields, _ := record["fields"].(map[string]interface{})
+	currentName := resolveSectionName(fields, shortID(recordName))
+	op := buildRenameSectionOp(recordName, changeTag, strings.TrimSpace(newName))
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
+	if err != nil {
+		return errResult(err), nil
+	}
+	canonical := sections.CanonicalName(strings.TrimSpace(newName))
+	updatedChangeTag := updatedRecordChangeTag(result)
+	w.Sync.Cache.Sections[recordName] = &cache.SectionData{
+		Name:          strings.TrimSpace(newName),
+		CanonicalName: &canonical,
+		ListRef:       &listID,
+		ChangeTag:     updatedChangeTag,
+	}
+	if err := w.Sync.Cache.Save(); err != nil {
+		// non-fatal
+	}
+	return map[string]interface{}{
+		"section_id": recordName,
+		"list_id":    listID,
+		"old_name":   currentName,
+		"name":       strings.TrimSpace(newName),
+		"records":    result["records"],
+	}, nil
+}
+
+func (w *Writer) DeleteSection(listHint, sectionHint string, force bool) (map[string]interface{}, error) {
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return errResult(err), nil
+	}
+	listID, err := w.resolveListRef(listHint, "")
+	if err != nil {
+		return errResult(err), nil
+	}
+
+	recordName, record, err := w.lookupSectionRecord(ownerID, listID, sectionHint)
+	if err != nil {
+		if force && (looksLikeUUID(sectionHint) || strings.HasPrefix(sectionHint, "ListSection/")) {
+			sectionID := shortID(sectionHint)
+			cleared, clearErr := w.clearOrphanSectionMemberships(ownerID, listID, sectionID)
+			if clearErr != nil {
+				return errResult(clearErr), nil
+			}
+			return map[string]interface{}{
+				"section_id":    sections.ListSectionRecordName(sectionID),
+				"list_id":       listID,
+				"cleared_count": len(cleared),
+				"orphaned":      true,
+			}, nil
+		}
+		return errResult(err), nil
+	}
+	sectionID := shortID(recordName)
+	fields, _ := record["fields"].(map[string]interface{})
+	sectionName := resolveSectionName(fields, sectionID)
+
+	memberIDs, err := w.memberIDsForSection(ownerID, listID, sectionID)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if len(memberIDs) > 0 && !force {
+		return errResult(fmt.Errorf("section %s is not empty (%d reminders); pass --force to clear memberships first", sectionName, len(memberIDs))), nil
+	}
+	if len(memberIDs) > 0 {
+		if err := w.applySectionMembership(ownerID, listID, "", memberIDs, true); err != nil {
+			return errResult(err), nil
+		}
+	}
+
+	changeTag, _ := record["recordChangeTag"].(string)
+	if changeTag == "" {
+		return errResult(fmt.Errorf("section %s missing change tag", recordName)), nil
+	}
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
+		"operationType": "delete",
+		"record": map[string]interface{}{
+			"recordName":      recordName,
+			"recordChangeTag": changeTag,
+		},
+	}})
+	if err != nil {
+		return errResult(err), nil
+	}
+	delete(w.Sync.Cache.Sections, recordName)
+	if err := w.Sync.Cache.Save(); err != nil {
+		// non-fatal
+	}
+	return map[string]interface{}{
+		"section_id":     recordName,
+		"list_id":        listID,
+		"name":           sectionName,
+		"cleared_count":  len(memberIDs),
+		"records":        result["records"],
+	}, nil
 }
 
 func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, reminderIDs []string, clearOnly bool) error {
@@ -167,6 +335,120 @@ func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, remin
 	return nil
 }
 
+func (w *Writer) clearOrphanSectionMemberships(ownerID, listID, sectionID string) ([]string, error) {
+	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	if err != nil {
+		return nil, err
+	}
+	fields, _ := listRecord["fields"].(map[string]interface{})
+	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
+	if assetURL == "" {
+		return nil, nil
+	}
+	rawAsset, err := w.CK.DownloadAsset(assetURL)
+	if err != nil {
+		return nil, fmt.Errorf("download memberships asset: %w", err)
+	}
+	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
+	if err != nil {
+		return nil, fmt.Errorf("decode memberships asset: %w", err)
+	}
+
+	removed := sections.RemoveSection(membershipFile, sectionID)
+	if len(removed) == 0 {
+		return nil, nil
+	}
+
+	encoded, err := sections.EncodeMembershipFile(membershipFile)
+	if err != nil {
+		return nil, fmt.Errorf("encode memberships asset: %w", err)
+	}
+	tokens, err := w.CK.RequestAssetUploadTokens(ownerID, []cloudkit.AssetUploadTokenRequest{{
+		RecordType: "List",
+		RecordName: listID,
+		FieldName:  "MembershipsOfRemindersInSectionsAsData",
+	}})
+	if err != nil {
+		return nil, fmt.Errorf("request asset upload token: %w", err)
+	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no asset upload token returned")
+	}
+	uploadURL, _ := tokens[0]["url"].(string)
+	if uploadURL == "" {
+		return nil, fmt.Errorf("asset upload token missing url")
+	}
+
+	assetValue, err := w.CK.UploadAsset(uploadURL, encoded)
+	if err != nil {
+		return nil, fmt.Errorf("upload memberships asset: %w", err)
+	}
+	changeTag, _ := listRecord["recordChangeTag"].(string)
+	if changeTag == "" {
+		return nil, fmt.Errorf("list %s missing change tag", listID)
+	}
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
+		"operationType": "update",
+		"record": map[string]interface{}{
+			"recordType":      "List",
+			"recordName":      listID,
+			"recordChangeTag": changeTag,
+			"fields": map[string]interface{}{
+				"MembershipsOfRemindersInSectionsAsData": map[string]interface{}{
+					"value": assetValue,
+				},
+			},
+		},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	if recErr := checkRecordErrors(result); recErr != nil {
+		return nil, recErr
+	}
+	return removed, nil
+}
+
+func (w *Writer) lookupSectionRecord(ownerID, listID, sectionHint string) (string, map[string]interface{}, error) {
+	sectionID, _, err := w.resolveSectionRef(ownerID, listID, sectionHint)
+	if err != nil {
+		return "", nil, err
+	}
+	recordName := sections.ListSectionRecordName(sectionID)
+	record, err := lookupRecord(w.CK, ownerID, recordName)
+	if err != nil {
+		return "", nil, err
+	}
+	return recordName, record, nil
+}
+
+func (w *Writer) memberIDsForSection(ownerID, listID, sectionID string) ([]string, error) {
+	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	if err != nil {
+		return nil, err
+	}
+	fields, _ := listRecord["fields"].(map[string]interface{})
+	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
+	if assetURL == "" {
+		return nil, nil
+	}
+	rawAsset, err := w.CK.DownloadAsset(assetURL)
+	if err != nil {
+		return nil, err
+	}
+	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, membership := range membershipFile.Memberships {
+		if membership.GroupID == sectionID {
+			ids = append(ids, membership.MemberID)
+		}
+	}
+	return ids, nil
+}
+
 func (w *Writer) resolveReminderRef(reminderHint string) (string, error) {
 	if strings.HasPrefix(reminderHint, "Reminder/") {
 		return reminderHint, nil
@@ -218,6 +500,9 @@ func (w *Writer) resolveSectionRef(ownerID, listID, sectionHint string) (string,
 	}
 
 	target := strings.ToLower(sectionHint)
+	if sectionID, sectionName, ok := w.findSectionInCache(listID, target); ok {
+		return sectionID, sectionName, nil
+	}
 	if sectionID, sectionName, ok := w.findSectionViaMemberships(ownerID, listID, target); ok {
 		return sectionID, sectionName, nil
 	}
@@ -261,6 +546,21 @@ func (w *Writer) resolveSectionRef(ownerID, listID, sectionHint string) (string,
 		}
 	}
 	return "", "", fmt.Errorf("section %q not found in %s", sectionHint, listID)
+}
+
+func (w *Writer) findSectionInCache(listID, target string) (string, string, bool) {
+	for recordName, section := range w.Sync.Cache.Sections {
+		if section == nil || section.ListRef == nil || *section.ListRef != listID {
+			continue
+		}
+		if strings.ToLower(section.Name) == target || strings.ToLower(shortID(recordName)) == target {
+			return shortID(recordName), section.Name, true
+		}
+		if section.CanonicalName != nil && strings.ToLower(*section.CanonicalName) == target {
+			return shortID(recordName), section.Name, true
+		}
+	}
+	return "", "", false
 }
 
 func (w *Writer) findSectionViaMemberships(ownerID, listID, target string) (string, string, bool) {
@@ -363,6 +663,72 @@ func appleReferenceSeconds() float64 {
 	return float64(time.Now().UnixMilli())/1000 - 978307200
 }
 
+func buildCreateSectionOp(ownerID, listID, recordName, name string) map[string]interface{} {
+	nowMillis := time.Now().UnixMilli()
+	sectionID := shortID(recordName)
+	fields := map[string]interface{}{
+		"CreationDate": map[string]interface{}{"value": nowMillis, "type": "TIMESTAMP"},
+		"DisplayName":  map[string]interface{}{"value": name, "type": "STRING", "isEncrypted": true},
+		"CanonicalName": map[string]interface{}{
+			"value":       sections.CanonicalName(name),
+			"type":        "STRING",
+			"isEncrypted": true,
+		},
+		"ResolutionTokenMap": map[string]interface{}{
+			"value": sections.ResolutionTokenMapJSON(nowMillis, sections.DeterministicReplicaID(sectionID), true),
+			"type":  "STRING",
+		},
+		"Imported": map[string]interface{}{"value": 0, "type": "NUMBER_INT64"},
+		"List": map[string]interface{}{
+			"value": map[string]interface{}{
+				"recordName": listID,
+				"action":     "VALIDATE",
+				"zoneID": map[string]interface{}{
+					"zoneName":        cloudkit.Zone,
+					"ownerRecordName": ownerID,
+					"zoneType":        "REGULAR_CUSTOM_ZONE",
+				},
+			},
+			"type": "REFERENCE",
+		},
+		"Deleted": map[string]interface{}{"value": 0, "type": "NUMBER_INT64"},
+	}
+	return map[string]interface{}{
+		"operationType": "create",
+		"record": map[string]interface{}{
+			"recordName": recordName,
+			"recordType": "ListSection",
+			"parent": map[string]interface{}{
+				"recordName": listID,
+			},
+			"fields": fields,
+		},
+	}
+}
+
+func buildRenameSectionOp(recordName, changeTag, newName string) map[string]interface{} {
+	return map[string]interface{}{
+		"operationType": "update",
+		"record": map[string]interface{}{
+			"recordName":      recordName,
+			"recordType":      "ListSection",
+			"recordChangeTag": changeTag,
+			"fields": map[string]interface{}{
+				"DisplayName": map[string]interface{}{
+					"value":       newName,
+					"type":        "STRING",
+					"isEncrypted": true,
+				},
+				"CanonicalName": map[string]interface{}{
+					"value":       sections.CanonicalName(newName),
+					"type":        "STRING",
+					"isEncrypted": true,
+				},
+			},
+		},
+	}
+}
+
 func looksLikeUUID(s string) bool {
 	if len(s) != 36 {
 		return false
@@ -390,4 +756,20 @@ func shortID(id string) string {
 		}
 	}
 	return id
+}
+
+func updatedRecordChangeTag(result map[string]interface{}) *string {
+	records, ok := result["records"].([]interface{})
+	if !ok || len(records) == 0 {
+		return nil
+	}
+	record, ok := records[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	changeTag, _ := record["recordChangeTag"].(string)
+	if changeTag == "" {
+		return nil
+	}
+	return &changeTag
 }

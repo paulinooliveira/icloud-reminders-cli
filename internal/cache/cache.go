@@ -31,9 +31,18 @@ type ReminderData struct {
 	ChangeTag      *string `json:"change_tag,omitempty"`
 }
 
+// SectionData holds cached metadata for a list section.
+type SectionData struct {
+	Name          string  `json:"name"`
+	CanonicalName *string `json:"canonical_name,omitempty"`
+	ListRef       *string `json:"list_ref,omitempty"`
+	ChangeTag     *string `json:"change_tag,omitempty"`
+}
+
 // Cache holds the local cache of reminders and lists.
 type Cache struct {
 	Reminders map[string]*ReminderData `json:"reminders"`
+	Sections  map[string]*SectionData  `json:"sections"`
 	Lists     map[string]string        `json:"lists"`
 	SyncToken *string                  `json:"sync_token,omitempty"`
 	OwnerID   *string                  `json:"owner_id,omitempty"`
@@ -44,6 +53,7 @@ type Cache struct {
 func NewCache() *Cache {
 	return &Cache{
 		Reminders: make(map[string]*ReminderData),
+		Sections:  make(map[string]*SectionData),
 		Lists:     make(map[string]string),
 	}
 }
@@ -60,6 +70,9 @@ func Load() *Cache {
 	}
 	if c.Reminders == nil {
 		c.Reminders = make(map[string]*ReminderData)
+	}
+	if c.Sections == nil {
+		c.Sections = make(map[string]*SectionData)
 	}
 	if c.Lists == nil {
 		c.Lists = make(map[string]string)

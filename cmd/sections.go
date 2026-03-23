@@ -49,38 +49,15 @@ var sectionsCmd = &cobra.Command{
 			listName = shortID(listRecordName)
 		}
 
-		assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
-		if assetURL == "" {
-			fmt.Printf("\n📚 %s\n", listName)
-			fmt.Println("  No section metadata on this list.")
-			return nil
-		}
-
-		rawAsset, err := ckClient.DownloadAsset(assetURL)
+		membershipFile, sectionRecords, err := loadListSections(ownerID, listRecordName, fields)
 		if err != nil {
-			return fmt.Errorf("download section memberships: %w", err)
-		}
-		membershipFile, err := sections.DecodeMembershipFile(rawAsset)
-		if err != nil {
-			return fmt.Errorf("decode section memberships: %w", err)
+			return err
 		}
 
-		if len(membershipFile.Memberships) == 0 {
-			fmt.Printf("\n📚 %s\n", listName)
-			fmt.Println("  No reminders are currently assigned to sections.")
-			return nil
-		}
-
-		sectionRecordNames := make([]string, 0, len(membershipFile.Memberships))
 		reminderRecordNames := make([]string, 0, len(membershipFile.Memberships)*2)
-		seenSections := make(map[string]struct{})
 		seenReminders := make(map[string]struct{})
 		seenReminderRecords := make(map[string]struct{})
 		for _, membership := range membershipFile.Memberships {
-			if _, ok := seenSections[membership.GroupID]; !ok {
-				seenSections[membership.GroupID] = struct{}{}
-				sectionRecordNames = append(sectionRecordNames, sections.ListSectionRecordName(membership.GroupID))
-			}
 			if _, ok := seenReminders[membership.MemberID]; !ok {
 				seenReminders[membership.MemberID] = struct{}{}
 				for _, candidate := range []string{membership.MemberID, sections.ReminderRecordName(membership.MemberID)} {
@@ -93,10 +70,6 @@ var sectionsCmd = &cobra.Command{
 			}
 		}
 
-		sectionRecords, err := ckClient.LookupRecords(ownerID, sectionRecordNames)
-		if err != nil {
-			return fmt.Errorf("lookup sections: %w", err)
-		}
 		reminderRecords, err := ckClient.LookupRecords(ownerID, reminderRecordNames)
 		if err != nil {
 			return fmt.Errorf("lookup section reminders: %w", err)
@@ -140,6 +113,11 @@ var sectionsCmd = &cobra.Command{
 		}
 
 		ordered := sections.OrderedSections(sectionNames, membershipFile.Memberships)
+		if len(ordered) == 0 {
+			fmt.Printf("\n📚 %s\n", listName)
+			fmt.Println("  No sections on this list.")
+			return nil
+		}
 		fmt.Printf("\n📚 %s (%d sections)\n", listName, len(ordered))
 		for _, section := range ordered {
 			title := section.Name
@@ -228,6 +206,92 @@ func findListByNameLive(ownerID, name string) string {
 	return ""
 }
 
+func loadListSections(ownerID, listRecordName string, fields map[string]interface{}) (*sections.MembershipFile, []map[string]interface{}, error) {
+	membershipFile := &sections.MembershipFile{}
+	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
+	if assetURL != "" {
+		rawAsset, err := ckClient.DownloadAsset(assetURL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("download section memberships: %w", err)
+		}
+		decoded, err := sections.DecodeMembershipFile(rawAsset)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decode section memberships: %w", err)
+		}
+		membershipFile = decoded
+	}
+
+	sectionRecordNames := make(map[string]struct{})
+	for _, membership := range membershipFile.Memberships {
+		sectionRecordNames[sections.ListSectionRecordName(membership.GroupID)] = struct{}{}
+	}
+	if syncEngine != nil && syncEngine.Cache != nil {
+		for recordName, section := range syncEngine.Cache.Sections {
+			if section == nil || section.ListRef == nil || *section.ListRef != listRecordName {
+				continue
+			}
+			sectionRecordNames[recordName] = struct{}{}
+		}
+	}
+
+	token := ""
+	const maxPages = 16
+	for page := 1; page <= maxPages; page++ {
+		data, err := ckClient.ChangesZone(ownerID, token)
+		if err != nil {
+			return nil, nil, err
+		}
+		zones, _ := data["zones"].([]interface{})
+		if len(zones) == 0 {
+			break
+		}
+		zone, _ := zones[0].(map[string]interface{})
+		records, _ := zone["records"].([]interface{})
+		for _, raw := range records {
+			record, _ := raw.(map[string]interface{})
+			recordType, _ := record["recordType"].(string)
+			if recordType != "ListSection" {
+				continue
+			}
+			if deleted, _ := record["deleted"].(bool); deleted {
+				continue
+			}
+			recordFields, _ := record["fields"].(map[string]interface{})
+			if getReferenceRecordName(recordFields, "List") != listRecordName {
+				continue
+			}
+			recordName, _ := record["recordName"].(string)
+			if recordName != "" {
+				sectionRecordNames[recordName] = struct{}{}
+			}
+		}
+		moreComing, _ := zone["moreComing"].(bool)
+		if !moreComing {
+			break
+		}
+		token, _ = zone["syncToken"].(string)
+		if token == "" {
+			break
+		}
+	}
+
+	recordNames := make([]string, 0, len(sectionRecordNames))
+	for recordName := range sectionRecordNames {
+		recordNames = append(recordNames, recordName)
+	}
+	sort.Strings(recordNames)
+
+	if len(recordNames) == 0 {
+		return membershipFile, nil, nil
+	}
+
+	records, err := ckClient.LookupRecords(ownerID, recordNames)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lookup sections: %w", err)
+	}
+	return membershipFile, records, nil
+}
+
 func lookupSingleRecord(ownerID, recordName string) (map[string]interface{}, error) {
 	records, err := ckClient.LookupRecords(ownerID, []string{recordName})
 	if err != nil {
@@ -254,6 +318,13 @@ func getAssetDownloadURL(fields map[string]interface{}, key string) string {
 	val, _ := field["value"].(map[string]interface{})
 	url, _ := val["downloadURL"].(string)
 	return url
+}
+
+func getReferenceRecordName(fields map[string]interface{}, key string) string {
+	field, _ := fields[key].(map[string]interface{})
+	val, _ := field["value"].(map[string]interface{})
+	recordName, _ := val["recordName"].(string)
+	return recordName
 }
 
 func findUnsectionedReminderIDs(fields map[string]interface{}, seenReminders map[string]struct{}) []string {

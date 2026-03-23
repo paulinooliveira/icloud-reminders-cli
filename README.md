@@ -88,6 +88,20 @@ reminders create-list "Sebastian"
 # Ensure a top-level anchor reminder exists
 reminders ensure-parent "explorer" -l "Sebastian"
 
+# Ensure a native section exists
+reminders ensure-section "DK" -l "Belo"
+
+# Rename or delete a native section
+reminders rename-section "DK" -l "Belo" --name "Davidson Kempner"
+reminders delete-section "Davidson Kempner" -l "Belo"
+
+# Move reminders into or out of a section
+reminders set-section ABC123 -l "Belo" --section "DK"
+reminders set-section ABC123 -l "Belo" --clear
+
+# Show live sections, including empty ones the CLI created
+reminders sections -l "Sebastian"
+
 # Add reminder
 reminders add "Buy milk" -l "Einkauf"
 reminders add "Buy milk" -l "4400A74B-9D82-4F9D-8CB8-392C72BF856A"  # list id also works

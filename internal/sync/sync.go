@@ -166,6 +166,34 @@ func (e *Engine) processRecords(records []interface{}) {
 				}
 			}
 
+		case "ListSection":
+			if deleted {
+				delete(e.Cache.Sections, rname)
+			} else {
+				name := getFieldString(fields, "DisplayName")
+				canonical := getFieldString(fields, "CanonicalName")
+				listRef := getFieldRefName(fields, "List")
+				changeTag, _ := r["recordChangeTag"].(string)
+
+				sd := &cache.SectionData{
+					Name: name,
+				}
+				if canonical != "" {
+					sd.CanonicalName = &canonical
+				}
+				if listRef != "" {
+					sd.ListRef = &listRef
+				}
+				if changeTag != "" {
+					sd.ChangeTag = &changeTag
+				}
+				if name == "" && canonical == "" && listRef == "" && changeTag == "" {
+					delete(e.Cache.Sections, rname)
+				} else {
+					e.Cache.Sections[rname] = sd
+				}
+			}
+
 		case "Reminder":
 			if deleted {
 				delete(e.Cache.Reminders, rname)
