@@ -210,13 +210,63 @@ type ZoneID struct {
 func (c *Client) ChangesZone(ownerID string, syncToken string) (map[string]interface{}, error) {
 	spec := ZoneChangesSpec{
 		ZoneID:      ZoneID{ZoneName: Zone, OwnerRecordName: ownerID},
-		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder"},
+		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder", "DisplayName", "CanonicalName", "MembershipsOfRemindersInSectionsAsData", "MembershipsOfRemindersInSectionsChecksum", "ReminderIDs"},
 	}
 	if syncToken != "" {
 		spec.SyncToken = syncToken
 	}
 	return c.post("database/1/"+Container+"/production/private/changes/zone",
 		ChangesZoneRequest{Zones: []ZoneChangesSpec{spec}})
+}
+
+// LookupRecords fetches specific records by record name.
+func (c *Client) LookupRecords(ownerID string, recordNames []string) ([]map[string]interface{}, error) {
+	records := make([]map[string]interface{}, 0, len(recordNames))
+	for _, recordName := range recordNames {
+		records = append(records, map[string]interface{}{"recordName": recordName})
+	}
+
+	result, err := c.post("database/1/"+Container+"/production/private/records/lookup", map[string]interface{}{
+		"zoneID": map[string]interface{}{
+			"zoneName":        Zone,
+			"ownerRecordName": ownerID,
+		},
+		"records": records,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	raw, _ := result["records"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(raw))
+	for _, rec := range raw {
+		if m, ok := rec.(map[string]interface{}); ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// DownloadAsset fetches a CloudKit asset by download URL.
+func (c *Client) DownloadAsset(downloadURL string) ([]byte, error) {
+	req, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "*/*")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("asset download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: truncate(string(body), 500)}
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 // ModifyRecords creates, updates, or deletes CloudKit records.

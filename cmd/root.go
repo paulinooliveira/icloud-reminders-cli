@@ -67,6 +67,7 @@ func init() {
 	RootCmd.AddCommand(
 		authCmd,
 		listCmd,
+		sectionsCmd,
 		searchCmd,
 		listsCmd,
 		createListCmd,
