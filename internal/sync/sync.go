@@ -8,8 +8,8 @@ import (
 	"icloud-reminders/internal/cache"
 	"icloud-reminders/internal/cloudkit"
 	"icloud-reminders/internal/logger"
-	"icloud-reminders/pkg/models"
 	"icloud-reminders/internal/utils"
+	"icloud-reminders/pkg/models"
 )
 
 // Engine handles syncing reminders with CloudKit.
@@ -265,9 +265,14 @@ func (e *Engine) GetLists() []*models.ReminderList {
 	return result
 }
 
-// FindListByName finds a list ID by name (case-insensitive).
+// FindListByName finds a list ID by name or ID (case-insensitive for names).
 func (e *Engine) FindListByName(name string) string {
 	nameLower := toLower(name)
+	for id := range e.Cache.Lists {
+		if id == name || shortID(id) == name {
+			return id
+		}
+	}
 	for id, n := range e.Cache.Lists {
 		if toLower(n) == nameLower {
 			return id
@@ -341,4 +346,13 @@ func toLower(s string) string {
 		result[i] = c
 	}
 	return string(result)
+}
+
+func shortID(id string) string {
+	for i := len(id) - 1; i >= 0; i-- {
+		if id[i] == '/' {
+			return id[i+1:]
+		}
+	}
+	return id
 }

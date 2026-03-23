@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"icloud-reminders/internal/cache"
+	iclouddsync "icloud-reminders/internal/sync"
 	"icloud-reminders/internal/utils"
 	"icloud-reminders/pkg/models"
 )
@@ -106,6 +107,52 @@ func TestBuildReminderFieldsRejectsEmptyTitle(t *testing.T) {
 	_, err := buildReminderFields(&cache.ReminderData{Title: "Original"}, ReminderChanges{Title: &clear})
 	if err == nil {
 		t.Fatal("expected empty title error")
+	}
+}
+
+func TestBuildCreateListOpUsesListSchema(t *testing.T) {
+	op, recordName := buildCreateListOp("Sebastian")
+
+	if recordName == "" {
+		t.Fatal("expected recordName")
+	}
+	if got := op["operationType"]; got != "create" {
+		t.Fatalf("operationType mismatch: got %#v", got)
+	}
+
+	record, ok := op["record"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected record payload")
+	}
+	if got := record["recordType"]; got != "List" {
+		t.Fatalf("recordType mismatch: got %#v", got)
+	}
+	if got := record["recordName"]; got != recordName {
+		t.Fatalf("recordName mismatch: got %#v", got)
+	}
+	fields, ok := record["fields"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected fields payload")
+	}
+	if got := fields["Name"].(map[string]interface{})["value"]; got != "Sebastian" {
+		t.Fatalf("name mismatch: got %#v", got)
+	}
+}
+
+func TestFindListByNameAcceptsShortID(t *testing.T) {
+	engine := &iclouddsync.Engine{
+		Cache: &cache.Cache{
+			Lists: map[string]string{
+				"List/4400A74B-9D82-4F9D-8CB8-392C72BF856A": "Sebastia",
+			},
+		},
+	}
+
+	if got := engine.FindListByName("4400A74B-9D82-4F9D-8CB8-392C72BF856A"); got != "List/4400A74B-9D82-4F9D-8CB8-392C72BF856A" {
+		t.Fatalf("full id mismatch: got %q", got)
+	}
+	if got := engine.FindListByName("Sebastia"); got != "List/4400A74B-9D82-4F9D-8CB8-392C72BF856A" {
+		t.Fatalf("name lookup mismatch: got %q", got)
 	}
 }
 

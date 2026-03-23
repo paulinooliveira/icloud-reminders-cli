@@ -34,6 +34,46 @@ func New(ck *cloudkit.Client, engine *sync.Engine) *Writer {
 	return &Writer{CK: ck, Sync: engine}
 }
 
+// CreateList creates a new reminder list when it does not already exist.
+func (w *Writer) CreateList(name string) (map[string]interface{}, error) {
+	if name == "" {
+		return errResult(fmt.Errorf("list name cannot be empty")), nil
+	}
+	if existing := w.Sync.FindListByName(name); existing != "" {
+		return map[string]interface{}{
+			"existing": true,
+			"list_id":  existing,
+			"name":     name,
+		}, nil
+	}
+
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return errResult(err), nil
+	}
+
+	op, recordName := buildCreateListOp(name)
+
+	logger.Debugf("create-list: creating record %s", recordName)
+	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	if err != nil {
+		return errResult(err), nil
+	}
+	if err := checkRecordErrors(result); err != nil {
+		return errResult(err), nil
+	}
+
+	w.Sync.Cache.Lists[recordName] = name
+	if err := w.Sync.Cache.Save(); err != nil {
+		logger.Warnf("cache save failed: %v", err)
+	}
+
+	logger.Infof("Created list: %q", name)
+	result["list_id"] = recordName
+	result["name"] = name
+	return result, nil
+}
+
 // ownerID returns the cached or fetched owner ID.
 func (w *Writer) ownerID() (string, error) {
 	if w.Sync.Cache.OwnerID != nil && *w.Sync.Cache.OwnerID != "" {
@@ -445,6 +485,22 @@ func buildCreateOp(title, listID, parentRef, dueDate string, priority int, notes
 		},
 	}
 	return op, recordName, nil
+}
+
+func buildCreateListOp(name string) (map[string]interface{}, string) {
+	recordName := "List/" + utils.NewUUIDString()
+	fields := map[string]interface{}{
+		"Name": map[string]interface{}{"value": name},
+	}
+	op := map[string]interface{}{
+		"operationType": "create",
+		"record": map[string]interface{}{
+			"recordType": "List",
+			"recordName": recordName,
+			"fields":     fields,
+		},
+	}
+	return op, recordName
 }
 
 func errResult(err error) map[string]interface{} {

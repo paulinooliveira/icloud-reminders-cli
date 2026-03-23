@@ -69,6 +69,7 @@ func init() {
 		listCmd,
 		searchCmd,
 		listsCmd,
+		createListCmd,
 		addCmd,
 		addBatchCmd,
 		completeCmd,

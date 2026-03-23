@@ -105,8 +105,12 @@ reminders search "milk" --all   # or: -a
 # Show all lists (with active counts and short IDs)
 reminders lists
 
+# Create a new list
+reminders create-list "Sebastian"
+
 # Add reminder (-l is REQUIRED)
 reminders add "Buy milk" -l "Einkauf"
+reminders add "Buy milk" -l "4400A74B-9D82-4F9D-8CB8-392C72BF856A"   # list id also works
 
 # Add with due date and priority
 reminders add "Call mom" -l "Einkauf" --due 2026-02-25 --priority high
