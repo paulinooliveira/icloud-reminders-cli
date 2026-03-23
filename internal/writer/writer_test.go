@@ -156,6 +156,56 @@ func TestFindListByNameAcceptsShortID(t *testing.T) {
 	}
 }
 
+func TestFindReminderByTitleFiltersByListAndTopLevel(t *testing.T) {
+	engine := &iclouddsync.Engine{
+		Cache: &cache.Cache{
+			Reminders: map[string]*cache.ReminderData{
+				"Reminder/top-a": {
+					Title:   "explorer",
+					ListRef: strPtr("List/a"),
+				},
+				"Reminder/child-a": {
+					Title:     "explorer",
+					ListRef:   strPtr("List/a"),
+					ParentRef: strPtr("Reminder/top-a"),
+				},
+				"Reminder/top-b": {
+					Title:   "explorer",
+					ListRef: strPtr("List/b"),
+				},
+			},
+		},
+	}
+
+	if got := engine.FindReminderByTitle("explorer", "List/a", true); got != "Reminder/top-a" {
+		t.Fatalf("top-level list-filtered lookup mismatch: got %q", got)
+	}
+	if got := engine.FindReminderByTitle("explorer", "List/b", true); got != "Reminder/top-b" {
+		t.Fatalf("list-b lookup mismatch: got %q", got)
+	}
+}
+
+func TestResolveParentRefAcceptsTitle(t *testing.T) {
+	engine := &iclouddsync.Engine{
+		Cache: &cache.Cache{
+			Reminders: map[string]*cache.ReminderData{
+				"Reminder/explorer-top": {
+					Title:   "explorer",
+					ListRef: strPtr("List/sebastian"),
+				},
+			},
+		},
+	}
+
+	if got := resolveParentRef(engine, "explorer", "List/sebastian"); got != "Reminder/explorer-top" {
+		t.Fatalf("title parent resolution mismatch: got %q", got)
+	}
+}
+
 func intPtr(v int) *int {
+	return &v
+}
+
+func strPtr(v string) *string {
 	return &v
 }

@@ -23,6 +23,10 @@ var listCmd = &cobra.Command{
 			return err
 		}
 		reminders := syncEngine.GetReminders(listAll)
+		listID := ""
+		if listFilter != "" {
+			listID = syncEngine.FindListByName(listFilter)
+		}
 
 		// --parent: show only children of a named parent reminder
 		if listParentFilter != "" {
@@ -34,8 +38,14 @@ var listCmd = &cobra.Command{
 		childrenByParent := make(map[string][]*models.Reminder)
 
 		for _, r := range reminders {
-			if listFilter != "" && toLowerStr(r.ListName) != toLowerStr(listFilter) {
-				continue
+			if listFilter != "" {
+				match := toLowerStr(r.ListName) == toLowerStr(listFilter)
+				if !match && listID != "" && r.ListRef != nil && *r.ListRef == listID {
+					match = true
+				}
+				if !match {
+					continue
+				}
 			}
 			if r.ParentRef != nil && *r.ParentRef != "" {
 				childrenByParent[*r.ParentRef] = append(childrenByParent[*r.ParentRef], r)
@@ -44,13 +54,23 @@ var listCmd = &cobra.Command{
 			}
 		}
 
+		visible := 0
 		active := 0
-		for _, r := range reminders {
-			if !r.Completed {
-				active++
+		for _, items := range byList {
+			for _, r := range items {
+				visible++
+				if !r.Completed {
+					active++
+				}
+				for _, child := range childrenByParent[r.ID] {
+					visible++
+					if !child.Completed {
+						active++
+					}
+				}
 			}
 		}
-		fmt.Printf("\n✅ Reminders: %d (%d active)\n", len(reminders), active)
+		fmt.Printf("\n✅ Reminders: %d (%d active)\n", visible, active)
 
 		listNames := make([]string, 0, len(byList))
 		for name := range byList {
@@ -206,7 +226,7 @@ func toLowerStr(s string) string {
 }
 
 func init() {
-	listCmd.Flags().StringVarP(&listFilter, "list", "l", "", "Filter by list name")
+	listCmd.Flags().StringVarP(&listFilter, "list", "l", "", "Filter by list name or ID")
 	listCmd.Flags().StringVar(&listParentFilter, "parent", "", "Show only children of this parent reminder (name or ID)")
 	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include completed reminders")
 }

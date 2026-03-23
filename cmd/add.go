@@ -92,10 +92,10 @@ func init() {
 	addCmd.Flags().StringVarP(&addDue, "due", "d", "", "Due date (YYYY-MM-DD)")
 	addCmd.Flags().StringVarP(&addPriority, "priority", "p", "", "Priority (high, medium, low)")
 	addCmd.Flags().StringVarP(&addNotes, "notes", "n", "", "Notes")
-	addCmd.Flags().StringVar(&addParent, "parent", "", "Parent reminder ID (creates subtask)")
+	addCmd.Flags().StringVar(&addParent, "parent", "", "Parent reminder title or ID (creates subtask)")
 	_ = addCmd.MarkFlagRequired("list")
 
 	addBatchCmd.Flags().StringVarP(&batchListName, "list", "l", "", "List name (required)")
-	addBatchCmd.Flags().StringVar(&batchParent, "parent", "", "Parent reminder ID (creates subtasks)")
+	addBatchCmd.Flags().StringVar(&batchParent, "parent", "", "Parent reminder title or ID (creates subtasks)")
 	_ = addBatchCmd.MarkFlagRequired("list")
 }

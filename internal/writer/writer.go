@@ -3,6 +3,7 @@ package writer
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"icloud-reminders/internal/cache"
@@ -55,11 +56,8 @@ func (w *Writer) CreateList(name string) (map[string]interface{}, error) {
 	op, recordName := buildCreateListOp(name)
 
 	logger.Debugf("create-list: creating record %s", recordName)
-	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
 	if err != nil {
-		return errResult(err), nil
-	}
-	if err := checkRecordErrors(result); err != nil {
 		return errResult(err), nil
 	}
 
@@ -72,6 +70,29 @@ func (w *Writer) CreateList(name string) (map[string]interface{}, error) {
 	result["list_id"] = recordName
 	result["name"] = name
 	return result, nil
+}
+
+// EnsureParentReminder ensures a top-level reminder exists as a stable anchor.
+func (w *Writer) EnsureParentReminder(title, listName, notes string) (map[string]interface{}, error) {
+	if title == "" {
+		return errResult(fmt.Errorf("parent title cannot be empty")), nil
+	}
+	listID := ""
+	if listName != "" {
+		listID = w.Sync.FindListByName(listName)
+		if listID == "" {
+			return errResult(fmt.Errorf("list '%s' not found", listName)), nil
+		}
+	}
+	if existing := w.Sync.FindReminderByTitle(title, listID, true); existing != "" {
+		return map[string]interface{}{
+			"existing": true,
+			"id":       existing,
+			"title":    title,
+			"list_id":  listID,
+		}, nil
+	}
+	return w.AddReminder(title, listName, "", "none", notes, "")
 }
 
 // ownerID returns the cached or fetched owner ID.
@@ -104,7 +125,7 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 
 	parentRef := ""
 	if parentID != "" {
-		parentRef = w.Sync.FindReminderByID(parentID)
+		parentRef = resolveParentRef(w.Sync, parentID, listID)
 		if parentRef == "" {
 			return errResult(fmt.Errorf("parent reminder '%s' not found", parentID)), nil
 		}
@@ -124,12 +145,8 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 	}
 
 	logger.Debugf("add: creating record %s in list %s", recordName, listID)
-	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
 	if err != nil {
-		return errResult(err), nil
-	}
-
-	if err := checkRecordErrors(result); err != nil {
 		return errResult(err), nil
 	}
 
@@ -167,6 +184,7 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 		logger.Warnf("cache save failed: %v", err)
 	}
 
+	result["id"] = recordName
 	return result, nil
 }
 
@@ -191,7 +209,7 @@ func (w *Writer) AddRemindersBatch(titles []string, listName, parentID string) (
 
 	parentRef := ""
 	if parentID != "" {
-		parentRef = w.Sync.FindReminderByID(parentID)
+		parentRef = resolveParentRef(w.Sync, parentID, listID)
 		if parentRef == "" {
 			return errResult(fmt.Errorf("parent reminder '%s' not found", parentID)), nil
 		}
@@ -219,11 +237,8 @@ func (w *Writer) AddRemindersBatch(titles []string, listName, parentID string) (
 	}
 
 	logger.Debugf("add-batch: creating %d records in list %s", len(ops), listID)
-	result, err := w.CK.ModifyRecords(ownerID, ops)
+	result, err := w.modifyRecordsWithRetry(ownerID, ops)
 	if err != nil {
-		return errResult(err), nil
-	}
-	if err := checkRecordErrors(result); err != nil {
 		return errResult(err), nil
 	}
 
@@ -287,7 +302,7 @@ func (w *Writer) CompleteReminder(reminderID string) (map[string]interface{}, er
 	}
 
 	logger.Debugf("complete: updating record %s", fullID)
-	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -341,7 +356,7 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 		title = rd.Title
 	}
 	logger.Debugf("delete: removing record %s", fullID)
-	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -393,11 +408,8 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 	}
 
 	logger.Debugf("edit: updating record %s", fullID)
-	result, err := w.CK.ModifyRecords(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
 	if err != nil {
-		return errResult(err), nil
-	}
-	if err := checkRecordErrors(result); err != nil {
 		return errResult(err), nil
 	}
 
@@ -501,6 +513,22 @@ func buildCreateListOp(name string) (map[string]interface{}, string) {
 		},
 	}
 	return op, recordName
+}
+
+func resolveParentRef(engine *sync.Engine, parentHint string, listID string) string {
+	if parentHint == "" {
+		return ""
+	}
+	if rid := engine.FindReminderByID(parentHint); rid != "" {
+		return rid
+	}
+	if rid := engine.FindReminderByTitle(parentHint, listID, true); rid != "" {
+		return rid
+	}
+	if rid := engine.FindReminderByTitle(parentHint, "", true); rid != "" {
+		return rid
+	}
+	return ""
 }
 
 func errResult(err error) map[string]interface{} {
@@ -640,6 +668,33 @@ func boolToInt(v bool) int {
 	return 0
 }
 
+func (w *Writer) modifyRecordsWithRetry(ownerID string, operations []map[string]interface{}) (map[string]interface{}, error) {
+	var lastErr error
+	backoffs := []time.Duration{0, 250 * time.Millisecond, 750 * time.Millisecond}
+	for attempt, delay := range backoffs {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		result, err := w.CK.ModifyRecords(ownerID, operations)
+		if err != nil {
+			lastErr = err
+			if isZoneBusy(err) && attempt < len(backoffs)-1 {
+				continue
+			}
+			return result, err
+		}
+		if recErr := checkRecordErrors(result); recErr != nil {
+			lastErr = recErr
+			if isZoneBusy(recErr) && attempt < len(backoffs)-1 {
+				continue
+			}
+			return result, recErr
+		}
+		return result, nil
+	}
+	return nil, lastErr
+}
+
 // checkRecordErrors extracts the first record-level error from CloudKit result.
 // CloudKit returns errors like {"records": [{"serverErrorCode": "BAD_REQUEST", "reason": "..."}]}
 func checkRecordErrors(result map[string]interface{}) error {
@@ -658,4 +713,11 @@ func checkRecordErrors(result map[string]interface{}) error {
 		}
 	}
 	return nil
+}
+
+func isZoneBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "ZONE_BUSY")
 }

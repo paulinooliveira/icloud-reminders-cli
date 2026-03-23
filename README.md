@@ -85,9 +85,13 @@ reminders lists
 # Create a new list
 reminders create-list "Sebastian"
 
+# Ensure a top-level anchor reminder exists
+reminders ensure-parent "explorer" -l "Sebastian"
+
 # Add reminder
 reminders add "Buy milk" -l "Einkauf"
 reminders add "Buy milk" -l "4400A74B-9D82-4F9D-8CB8-392C72BF856A"  # list id also works
+reminders add "Review calendar gaps" -l "Sebastian" --parent "explorer"
 
 # Add with due date and priority
 reminders add "Call mom" --due 2026-02-25 --priority high

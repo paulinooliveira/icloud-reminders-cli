@@ -299,6 +299,27 @@ func (e *Engine) FindReminderByID(partialID string) string {
 	return ""
 }
 
+// FindReminderByTitle finds a reminder by exact title, optionally filtering to a list
+// and/or top-level reminders only.
+func (e *Engine) FindReminderByTitle(title string, listID string, topLevelOnly bool) string {
+	titleLower := toLower(title)
+	for rid, data := range e.Cache.Reminders {
+		if data == nil || toLower(data.Title) != titleLower {
+			continue
+		}
+		if listID != "" {
+			if data.ListRef == nil || *data.ListRef != listID {
+				continue
+			}
+		}
+		if topLevelOnly && data.ParentRef != nil && *data.ParentRef != "" {
+			continue
+		}
+		return rid
+	}
+	return ""
+}
+
 // --- field extraction helpers ---
 
 func getFieldString(fields map[string]interface{}, key string) string {
