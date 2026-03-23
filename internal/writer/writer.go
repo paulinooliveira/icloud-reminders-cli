@@ -261,11 +261,14 @@ func (w *Writer) AddRemindersBatch(titles []string, listName, parentID string) (
 		logger.Warnf("cache save failed: %v", err)
 	}
 	var titleList []string
+	var idList []string
 	for _, c := range createdList {
 		titleList = append(titleList, c.title)
+		idList = append(idList, c.recordName)
 	}
 	result["created_count"] = len(createdList)
 	result["titles"] = titleList
+	result["ids"] = idList
 
 	return result, nil
 }

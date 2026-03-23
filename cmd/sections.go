@@ -72,9 +72,10 @@ var sectionsCmd = &cobra.Command{
 		}
 
 		sectionRecordNames := make([]string, 0, len(membershipFile.Memberships))
-		reminderRecordNames := make([]string, 0, len(membershipFile.Memberships))
+		reminderRecordNames := make([]string, 0, len(membershipFile.Memberships)*2)
 		seenSections := make(map[string]struct{})
 		seenReminders := make(map[string]struct{})
+		seenReminderRecords := make(map[string]struct{})
 		for _, membership := range membershipFile.Memberships {
 			if _, ok := seenSections[membership.GroupID]; !ok {
 				seenSections[membership.GroupID] = struct{}{}
@@ -82,7 +83,13 @@ var sectionsCmd = &cobra.Command{
 			}
 			if _, ok := seenReminders[membership.MemberID]; !ok {
 				seenReminders[membership.MemberID] = struct{}{}
-				reminderRecordNames = append(reminderRecordNames, sections.ReminderRecordName(membership.MemberID))
+				for _, candidate := range []string{membership.MemberID, sections.ReminderRecordName(membership.MemberID)} {
+					if _, exists := seenReminderRecords[candidate]; exists {
+						continue
+					}
+					seenReminderRecords[candidate] = struct{}{}
+					reminderRecordNames = append(reminderRecordNames, candidate)
+				}
 			}
 		}
 
@@ -117,16 +124,19 @@ var sectionsCmd = &cobra.Command{
 		reminderTitles := make(map[string]string, len(reminderRecords))
 		for _, record := range reminderRecords {
 			recordName, _ := record["recordName"].(string)
+			short := shortID(recordName)
 			if code, _ := record["serverErrorCode"].(string); code != "" {
-				reminderTitles[shortID(recordName)] = "(missing reminder)"
+				if _, exists := reminderTitles[short]; !exists {
+					reminderTitles[short] = "(missing reminder)"
+				}
 				continue
 			}
 			fields, _ := record["fields"].(map[string]interface{})
 			title := utils.ExtractTitle(getRecordString(fields, "TitleDocument"))
 			if title == "" {
-				title = shortID(recordName)
+				title = short
 			}
-			reminderTitles[shortID(recordName)] = title
+			reminderTitles[short] = title
 		}
 
 		ordered := sections.OrderedSections(sectionNames, membershipFile.Memberships)

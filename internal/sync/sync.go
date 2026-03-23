@@ -3,6 +3,7 @@ package sync
 
 import (
 	"fmt"
+	"strings"
 
 	"icloud-reminders/internal/auth"
 	"icloud-reminders/internal/cache"
@@ -268,6 +269,12 @@ func (e *Engine) GetLists() []*models.ReminderList {
 // FindListByName finds a list ID by name or ID (case-insensitive for names).
 func (e *Engine) FindListByName(name string) string {
 	nameLower := toLower(name)
+	if strings.HasPrefix(name, "List/") {
+		return name
+	}
+	if isUUIDLike(name) {
+		return "List/" + strings.ToUpper(name)
+	}
 	for id := range e.Cache.Lists {
 		if id == name || shortID(id) == name {
 			return id
@@ -337,6 +344,26 @@ func getFieldInt(fields map[string]interface{}, key string) int {
 		return v
 	}
 	return 0
+}
+
+func isUUIDLike(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if r != '-' {
+				return false
+			}
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func getFieldInt64(fields map[string]interface{}, key string) int64 {

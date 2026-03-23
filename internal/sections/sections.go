@@ -52,6 +52,11 @@ func DecodeMembershipFile(raw []byte) (*MembershipFile, error) {
 	return &mf, nil
 }
 
+// EncodeMembershipFile serializes the membership payload back to JSON.
+func EncodeMembershipFile(mf *MembershipFile) ([]byte, error) {
+	return json.Marshal(mf)
+}
+
 // ListSectionRecordName returns the CloudKit record name for a section.
 func ListSectionRecordName(sectionID string) string {
 	if strings.HasPrefix(sectionID, "ListSection/") {
@@ -119,4 +124,52 @@ func OrderedSections(names map[string]string, memberships []Membership) []Sectio
 		})
 	}
 	return out
+}
+
+// UpsertMemberships removes any previous section assignment for the reminder IDs
+// and assigns them to the target section.
+func UpsertMemberships(mf *MembershipFile, sectionID string, reminderIDs []string, modifiedOn float64) {
+	if mf == nil {
+		return
+	}
+	removeSet := make(map[string]struct{}, len(reminderIDs))
+	for _, reminderID := range reminderIDs {
+		removeSet[reminderID] = struct{}{}
+	}
+
+	filtered := make([]Membership, 0, len(mf.Memberships)+len(reminderIDs))
+	for _, membership := range mf.Memberships {
+		if _, ok := removeSet[membership.MemberID]; ok {
+			continue
+		}
+		filtered = append(filtered, membership)
+	}
+	for _, reminderID := range reminderIDs {
+		filtered = append(filtered, Membership{
+			ModifiedOn: modifiedOn,
+			GroupID:    sectionID,
+			MemberID:   reminderID,
+		})
+	}
+	mf.Memberships = filtered
+}
+
+// RemoveMemberships removes any section assignment for the reminder IDs.
+func RemoveMemberships(mf *MembershipFile, reminderIDs []string) {
+	if mf == nil {
+		return
+	}
+	removeSet := make(map[string]struct{}, len(reminderIDs))
+	for _, reminderID := range reminderIDs {
+		removeSet[reminderID] = struct{}{}
+	}
+
+	filtered := make([]Membership, 0, len(mf.Memberships))
+	for _, membership := range mf.Memberships {
+		if _, ok := removeSet[membership.MemberID]; ok {
+			continue
+		}
+		filtered = append(filtered, membership)
+	}
+	mf.Memberships = filtered
 }

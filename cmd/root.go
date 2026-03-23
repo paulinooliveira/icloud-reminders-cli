@@ -68,6 +68,7 @@ func init() {
 		authCmd,
 		listCmd,
 		sectionsCmd,
+		setSectionCmd,
 		searchCmd,
 		listsCmd,
 		createListCmd,

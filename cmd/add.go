@@ -12,6 +12,7 @@ var (
 	addPriority string
 	addNotes    string
 	addParent   string
+	addSection  string
 )
 
 var addCmd = &cobra.Command{
@@ -30,6 +31,16 @@ var addCmd = &cobra.Command{
 		if errMsg, ok := result["error"].(string); ok {
 			return fmt.Errorf("%s", errMsg)
 		}
+		if addSection != "" {
+			reminderID, _ := result["id"].(string)
+			sectionResult, err := w.AssignReminderToSection(reminderID, addListName, addSection)
+			if err != nil {
+				return err
+			}
+			if errMsg, ok := sectionResult["error"].(string); ok {
+				return fmt.Errorf("%s", errMsg)
+			}
+		}
 		listStr := ""
 		if addListName != "" {
 			listStr = fmt.Sprintf(" → %s", addListName)
@@ -38,7 +49,11 @@ var addCmd = &cobra.Command{
 		if addParent != "" {
 			parentStr = fmt.Sprintf(" (subtask of %s)", addParent)
 		}
-		fmt.Printf("✅ Added: '%s'%s%s\n", title, listStr, parentStr)
+		sectionStr := ""
+		if addSection != "" {
+			sectionStr = fmt.Sprintf(" [section %s]", addSection)
+		}
+		fmt.Printf("✅ Added: '%s'%s%s%s\n", title, listStr, parentStr, sectionStr)
 		return nil
 	},
 }
@@ -46,6 +61,7 @@ var addCmd = &cobra.Command{
 var (
 	batchListName string
 	batchParent   string
+	batchSection  string
 )
 
 var addBatchCmd = &cobra.Command{
@@ -63,6 +79,22 @@ var addBatchCmd = &cobra.Command{
 		if errMsg, ok := result["error"].(string); ok {
 			return fmt.Errorf("%s", errMsg)
 		}
+		if batchSection != "" {
+			listID := ""
+			if batchListName != "" {
+				listID = syncEngine.FindListByName(batchListName)
+			}
+			if listID == "" {
+				listID = batchListName
+			}
+			var ids []string
+			if rawIDs, ok := result["ids"].([]string); ok {
+				ids = rawIDs
+			}
+			if err := w.AssignReminderIDsToSection(listID, batchSection, ids); err != nil {
+				return err
+			}
+		}
 		count := len(args)
 		if c, ok := result["created_count"].(int); ok {
 			count = c
@@ -75,7 +107,11 @@ var addBatchCmd = &cobra.Command{
 		if batchParent != "" {
 			parentStr = fmt.Sprintf(" (subtasks of %s)", batchParent)
 		}
-		fmt.Printf("✅ Added %d reminders%s%s:\n", count, listStr, parentStr)
+		sectionStr := ""
+		if batchSection != "" {
+			sectionStr = fmt.Sprintf(" [section %s]", batchSection)
+		}
+		fmt.Printf("✅ Added %d reminders%s%s%s:\n", count, listStr, parentStr, sectionStr)
 		titles := args
 		if t, ok := result["titles"].([]string); ok {
 			titles = t
@@ -93,9 +129,11 @@ func init() {
 	addCmd.Flags().StringVarP(&addPriority, "priority", "p", "", "Priority (high, medium, low)")
 	addCmd.Flags().StringVarP(&addNotes, "notes", "n", "", "Notes")
 	addCmd.Flags().StringVar(&addParent, "parent", "", "Parent reminder title or ID (creates subtask)")
+	addCmd.Flags().StringVar(&addSection, "section", "", "Existing section name or ID")
 	_ = addCmd.MarkFlagRequired("list")
 
 	addBatchCmd.Flags().StringVarP(&batchListName, "list", "l", "", "List name (required)")
 	addBatchCmd.Flags().StringVar(&batchParent, "parent", "", "Parent reminder title or ID (creates subtasks)")
+	addBatchCmd.Flags().StringVar(&batchSection, "section", "", "Existing section name or ID")
 	_ = addBatchCmd.MarkFlagRequired("list")
 }

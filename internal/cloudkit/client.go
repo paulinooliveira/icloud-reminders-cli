@@ -206,6 +206,13 @@ type ZoneID struct {
 	OwnerRecordName string `json:"ownerRecordName"`
 }
 
+// AssetUploadTokenRequest identifies an asset field to upload.
+type AssetUploadTokenRequest struct {
+	RecordType string `json:"recordType"`
+	RecordName string `json:"recordName"`
+	FieldName  string `json:"fieldName"`
+}
+
 // ChangesZone fetches zone changes for delta or full sync.
 func (c *Client) ChangesZone(ownerID string, syncToken string) (map[string]interface{}, error) {
 	spec := ZoneChangesSpec{
@@ -267,6 +274,73 @@ func (c *Client) DownloadAsset(downloadURL string) ([]byte, error) {
 	}
 
 	return io.ReadAll(resp.Body)
+}
+
+// RequestAssetUploadTokens requests upload URLs for CloudKit asset fields.
+func (c *Client) RequestAssetUploadTokens(ownerID string, tokens []AssetUploadTokenRequest) ([]map[string]interface{}, error) {
+	items := make([]map[string]interface{}, 0, len(tokens))
+	for _, token := range tokens {
+		items = append(items, map[string]interface{}{
+			"recordType": token.RecordType,
+			"recordName": token.RecordName,
+			"fieldName":  token.FieldName,
+		})
+	}
+
+	result, err := c.post("database/1/"+Container+"/production/private/assets/upload", map[string]interface{}{
+		"zoneID": map[string]interface{}{
+			"zoneName":        Zone,
+			"ownerRecordName": ownerID,
+		},
+		"tokens": items,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	raw, _ := result["tokens"].([]interface{})
+	out := make([]map[string]interface{}, 0, len(raw))
+	for _, item := range raw {
+		if m, ok := item.(map[string]interface{}); ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// UploadAsset uploads raw bytes to an asset upload URL and returns the
+// resulting CloudKit asset dictionary.
+func (c *Client) UploadAsset(uploadURL string, body []byte) (map[string]interface{}, error) {
+	req, err := http.NewRequest("POST", uploadURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("asset upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: truncate(string(respBody), 500)}
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("asset upload json: %w", err)
+	}
+	singleFile, _ := result["singleFile"].(map[string]interface{})
+	if len(singleFile) == 0 {
+		return nil, fmt.Errorf("asset upload returned no singleFile payload")
+	}
+	return singleFile, nil
 }
 
 // ModifyRecords creates, updates, or deletes CloudKit records.
