@@ -44,6 +44,22 @@ type Client struct {
 	ckBase string
 }
 
+// NewWithHTTPClient constructs a CloudKit client with an explicit base URL and
+// HTTP client. This is primarily useful for tests.
+func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
+	base := baseURL
+	if !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &Client{
+		http:   httpClient,
+		ckBase: base,
+	}
+}
+
 // NewFromSession creates a CloudKit client from auth session data.
 // The session must have a valid CKBaseURL and cookies.
 func NewFromSession(sess *auth.SessionData) (*Client, error) {
@@ -217,7 +233,7 @@ type AssetUploadTokenRequest struct {
 func (c *Client) ChangesZone(ownerID string, syncToken string) (map[string]interface{}, error) {
 	spec := ZoneChangesSpec{
 		ZoneID:      ZoneID{ZoneName: Zone, OwnerRecordName: ownerID},
-		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder", "DisplayName", "CanonicalName", "MembershipsOfRemindersInSectionsAsData", "MembershipsOfRemindersInSectionsChecksum", "ReminderIDs", "HashtagIDs"},
+		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "Flagged", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder", "DisplayName", "CanonicalName", "MembershipsOfRemindersInSectionsAsData", "MembershipsOfRemindersInSectionsChecksum", "ReminderIDs", "HashtagIDs"},
 	}
 	if syncToken != "" {
 		spec.SyncToken = syncToken
@@ -355,7 +371,7 @@ func (c *Client) ModifyRecords(ownerID string, operations []map[string]interface
 	}
 	result, err := c.post("database/1/"+Container+"/production/private/records/modify", payload)
 	if err != nil {
-		return map[string]interface{}{"error": err.Error()}, nil
+		return nil, err
 	}
 	return result, nil
 }

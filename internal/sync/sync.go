@@ -220,56 +220,86 @@ func (e *Engine) processRecords(records []interface{}) {
 
 		case "Reminder":
 			if deleted {
-				delete(e.Cache.Reminders, rname)
+				for _, alias := range cache.ReminderAliases(rname) {
+					delete(e.Cache.Reminders, alias)
+				}
 			} else {
-				title := utils.ExtractTitle(getFieldString(fields, "TitleDocument"))
-				if title == "" {
-					title = "(untitled)"
+				existing := e.Cache.Reminders[rname]
+				rd := &cache.ReminderData{}
+				if existing != nil {
+					*rd = *existing
+					if existing.HashtagIDs != nil {
+						rd.HashtagIDs = append([]string(nil), existing.HashtagIDs...)
+					}
 				}
 
-				var dueStr, completionStr *string
-				if due := getFieldInt64(fields, "DueDate"); due != 0 {
-					s := utils.TsToStr(due)
-					dueStr = &s
+				if title := utils.ExtractTitle(getFieldString(fields, "TitleDocument")); title != "" {
+					rd.Title = title
 				}
-				if cd := getFieldInt64(fields, "CompletionDate"); cd != 0 {
-					s := utils.TsToStr(cd)
-					completionStr = &s
+				if rd.Title == "" {
+					rd.Title = "(untitled)"
 				}
 
-				listRef := getFieldRefName(fields, "List")
-				parentRef := getFieldRefName(fields, "ParentReminder")
-				hashtagIDs := getFieldStringList(fields, "HashtagIDs")
-				notes := utils.ExtractTitle(getFieldString(fields, "NotesDocument"))
-				priority := getFieldInt(fields, "Priority")
+				if _, ok := fields["DueDate"]; ok {
+					if due := getFieldInt64(fields, "DueDate"); due != 0 {
+						s := utils.TsToStr(due)
+						rd.Due = &s
+					} else {
+						rd.Due = nil
+					}
+				}
+				if _, ok := fields["CompletionDate"]; ok {
+					if cd := getFieldInt64(fields, "CompletionDate"); cd != 0 {
+						s := utils.TsToStr(cd)
+						rd.CompletionDate = &s
+					} else {
+						rd.CompletionDate = nil
+					}
+				}
+				if _, ok := fields["List"]; ok {
+					if listRef := getFieldRefName(fields, "List"); listRef != "" {
+						rd.ListRef = &listRef
+					} else {
+						rd.ListRef = nil
+					}
+				}
+				if _, ok := fields["ParentReminder"]; ok {
+					if parentRef := getFieldRefName(fields, "ParentReminder"); parentRef != "" {
+						rd.ParentRef = &parentRef
+					} else {
+						rd.ParentRef = nil
+					}
+				}
+				if _, ok := fields["HashtagIDs"]; ok {
+					hashtagIDs := getFieldStringList(fields, "HashtagIDs")
+					if len(hashtagIDs) > 0 {
+						rd.HashtagIDs = append([]string(nil), hashtagIDs...)
+					} else {
+						rd.HashtagIDs = nil
+					}
+				}
+				if _, ok := fields["NotesDocument"]; ok {
+					if notes := utils.ExtractTitle(getFieldString(fields, "NotesDocument")); notes != "" {
+						rd.Notes = &notes
+					} else {
+						rd.Notes = nil
+					}
+				}
+				if _, ok := fields["Priority"]; ok {
+					rd.Priority = getFieldInt(fields, "Priority")
+				}
+				if _, ok := fields["Completed"]; ok {
+					rd.Completed = getFieldInt(fields, "Completed") != 0
+				}
+				if _, ok := fields["Flagged"]; ok {
+					rd.Flagged = getFieldInt(fields, "Flagged") != 0
+				}
 				changeTag, _ := r["recordChangeTag"].(string)
 
 				modified, _ := r["modified"].(map[string]interface{})
-				var modTS *int64
 				if ts, ok := modified["timestamp"].(float64); ok {
 					v := int64(ts)
-					modTS = &v
-				}
-
-				rd := &cache.ReminderData{
-					Title:          title,
-					Completed:      getFieldInt(fields, "Completed") != 0,
-					CompletionDate: completionStr,
-					Due:            dueStr,
-					Priority:       priority,
-					ModifiedTS:     modTS,
-				}
-				if notes != "" {
-					rd.Notes = &notes
-				}
-				if len(hashtagIDs) > 0 {
-					rd.HashtagIDs = append([]string(nil), hashtagIDs...)
-				}
-				if listRef != "" {
-					rd.ListRef = &listRef
-				}
-				if parentRef != "" {
-					rd.ParentRef = &parentRef
+					rd.ModifiedTS = &v
 				}
 				if changeTag != "" {
 					rd.ChangeTag = &changeTag
@@ -291,6 +321,7 @@ func (e *Engine) GetReminders(includeCompleted bool) []*models.Reminder {
 			ID:             rid,
 			Title:          data.Title,
 			Completed:      data.Completed,
+			Flagged:        data.Flagged,
 			CompletionDate: data.CompletionDate,
 			Due:            data.Due,
 			Priority:       data.Priority,

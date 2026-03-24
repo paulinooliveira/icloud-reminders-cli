@@ -22,35 +22,73 @@ var addCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		title := args[0]
-		if err := syncEngine.Sync(false); err != nil {
-			return err
+		payload := struct {
+			Title    string   `json:"title"`
+			List     string   `json:"list"`
+			Due      string   `json:"due"`
+			Priority string   `json:"priority"`
+			Notes    string   `json:"notes"`
+			Parent   string   `json:"parent"`
+			Section  string   `json:"section"`
+			Tags     []string `json:"tags,omitempty"`
+		}{
+			Title: title, List: addListName, Due: addDue, Priority: addPriority, Notes: addNotes,
+			Parent: addParent, Section: addSection, Tags: addTags,
 		}
-		result, err := w.AddReminder(title, addListName, addDue, addPriority, addNotes, addParent)
-		if err != nil {
-			return err
-		}
-		if errMsg, ok := result["error"].(string); ok {
-			return fmt.Errorf("%s", errMsg)
-		}
-		if len(addTags) > 0 {
-			reminderID, _ := result["id"].(string)
-			tagResult, err := w.SetReminderTags(reminderID, addTags)
+		if err := executeMutation("add", "reminder", "", payload, true, func() (mutationOutcome, error) {
+			if err := syncEngine.Sync(false); err != nil {
+				return mutationOutcome{}, err
+			}
+			result, err := w.AddReminder(title, addListName, addDue, addPriority, addNotes, addParent)
 			if err != nil {
-				return err
+				return mutationOutcome{}, err
 			}
-			if errMsg, ok := tagResult["error"].(string); ok {
-				return fmt.Errorf("%s", errMsg)
+			if errMsg, ok := result["error"].(string); ok {
+				return mutationOutcome{}, fmt.Errorf("%s", errMsg)
 			}
-		}
-		if addSection != "" {
 			reminderID, _ := result["id"].(string)
-			sectionResult, err := w.AssignReminderToSection(reminderID, addListName, addSection)
-			if err != nil {
-				return err
+			if len(addTags) > 0 {
+				tagResult, err := w.SetReminderTags(reminderID, addTags)
+				if err != nil {
+					return mutationOutcome{}, err
+				}
+				if errMsg, ok := tagResult["error"].(string); ok {
+					return mutationOutcome{}, fmt.Errorf("%s", errMsg)
+				}
 			}
-			if errMsg, ok := sectionResult["error"].(string); ok {
-				return fmt.Errorf("%s", errMsg)
+			if addSection != "" {
+				sectionResult, err := w.AssignReminderToSection(reminderID, addListName, addSection)
+				if err != nil {
+					return mutationOutcome{}, err
+				}
+				if errMsg, ok := sectionResult["error"].(string); ok {
+					return mutationOutcome{}, fmt.Errorf("%s", errMsg)
+				}
 			}
+			var projection map[string]interface{}
+			if rd := syncEngine.Cache.Reminders[reminderID]; rd != nil {
+				projection = map[string]interface{}{
+					"id":         reminderID,
+					"title":      rd.Title,
+					"completed":  rd.Completed,
+					"flagged":    rd.Flagged,
+					"due":        rd.Due,
+					"priority":   rd.Priority,
+					"notes":      rd.Notes,
+					"list_ref":   rd.ListRef,
+					"parent_ref": rd.ParentRef,
+					"deleted":    false,
+				}
+			}
+			return mutationOutcome{
+				Backend:    result,
+				CloudID:    reminderID,
+				Title:      title,
+				ListID:     addListName,
+				Projection: projection,
+			}, nil
+		}); err != nil {
+			return err
 		}
 		listStr := ""
 		if addListName != "" {
@@ -84,36 +122,44 @@ var addBatchCmd = &cobra.Command{
 	Short: "Add multiple reminders at once",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := syncEngine.Sync(false); err != nil {
+		payload := struct {
+			Titles  []string `json:"titles"`
+			List    string   `json:"list"`
+			Parent  string   `json:"parent"`
+			Section string   `json:"section"`
+		}{Titles: args, List: batchListName, Parent: batchParent, Section: batchSection}
+		if err := executeMutation("add-batch", "reminder-batch", "", payload, true, func() (mutationOutcome, error) {
+			if err := syncEngine.Sync(false); err != nil {
+				return mutationOutcome{}, err
+			}
+			result, err := w.AddRemindersBatch(args, batchListName, batchParent)
+			if err != nil {
+				return mutationOutcome{}, err
+			}
+			if errMsg, ok := result["error"].(string); ok {
+				return mutationOutcome{}, fmt.Errorf("%s", errMsg)
+			}
+			if batchSection != "" {
+				listID := ""
+				if batchListName != "" {
+					listID = syncEngine.FindListByName(batchListName)
+				}
+				if listID == "" {
+					listID = batchListName
+				}
+				var ids []string
+				if rawIDs, ok := result["ids"].([]string); ok {
+					ids = rawIDs
+				}
+				if err := w.AssignReminderIDsToSection(listID, batchSection, ids); err != nil {
+					return mutationOutcome{}, err
+				}
+			}
+			return mutationOutcome{Backend: result}, nil
+		}); err != nil {
 			return err
-		}
-		result, err := w.AddRemindersBatch(args, batchListName, batchParent)
-		if err != nil {
-			return err
-		}
-		if errMsg, ok := result["error"].(string); ok {
-			return fmt.Errorf("%s", errMsg)
-		}
-		if batchSection != "" {
-			listID := ""
-			if batchListName != "" {
-				listID = syncEngine.FindListByName(batchListName)
-			}
-			if listID == "" {
-				listID = batchListName
-			}
-			var ids []string
-			if rawIDs, ok := result["ids"].([]string); ok {
-				ids = rawIDs
-			}
-			if err := w.AssignReminderIDsToSection(listID, batchSection, ids); err != nil {
-				return err
-			}
 		}
 		count := len(args)
-		if c, ok := result["created_count"].(int); ok {
-			count = c
-		}
 		listStr := ""
 		if batchListName != "" {
 			listStr = fmt.Sprintf(" → %s", batchListName)
@@ -127,11 +173,7 @@ var addBatchCmd = &cobra.Command{
 			sectionStr = fmt.Sprintf(" [section %s]", batchSection)
 		}
 		fmt.Printf("✅ Added %d reminders%s%s%s:\n", count, listStr, parentStr, sectionStr)
-		titles := args
-		if t, ok := result["titles"].([]string); ok {
-			titles = t
-		}
-		for _, t := range titles {
+		for _, t := range args {
 			fmt.Printf("   • %s\n", t)
 		}
 		return nil
@@ -140,7 +182,7 @@ var addBatchCmd = &cobra.Command{
 
 func init() {
 	addCmd.Flags().StringVarP(&addListName, "list", "l", "", "List name (required)")
-	addCmd.Flags().StringVarP(&addDue, "due", "d", "", "Due date (YYYY-MM-DD)")
+	addCmd.Flags().StringVarP(&addDue, "due", "d", "", "Due date or datetime (YYYY-MM-DD, YYYY-MM-DDTHH:MM, or RFC3339)")
 	addCmd.Flags().StringVarP(&addPriority, "priority", "p", "", "Priority (high, medium, low)")
 	addCmd.Flags().StringVarP(&addNotes, "notes", "n", "", "Notes")
 	addCmd.Flags().StringVar(&addParent, "parent", "", "Parent reminder title or ID (creates subtask)")

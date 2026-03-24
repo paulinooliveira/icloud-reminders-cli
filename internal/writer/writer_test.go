@@ -4,8 +4,11 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/cache"
 	iclouddsync "icloud-reminders/internal/sync"
 	"icloud-reminders/internal/utils"
@@ -80,10 +83,12 @@ func TestBuildReminderFieldsAppliesClearsAndReopen(t *testing.T) {
 
 	clear := ""
 	incomplete := false
+	flagged := true
 
 	fields, err := buildReminderFields(&cache.ReminderData{
 		Title:          "Original title",
 		Completed:      true,
+		Flagged:        false,
 		CompletionDate: &completionDate,
 		Due:            &due,
 		Priority:       models.PriorityMap["high"],
@@ -93,6 +98,7 @@ func TestBuildReminderFieldsAppliesClearsAndReopen(t *testing.T) {
 		Notes:     &clear,
 		Priority:  intPtr(models.PriorityMap["none"]),
 		Completed: &incomplete,
+		Flagged:   &flagged,
 	})
 	if err != nil {
 		t.Fatalf("buildReminderFields: %v", err)
@@ -110,8 +116,24 @@ func TestBuildReminderFieldsAppliesClearsAndReopen(t *testing.T) {
 	if got := fields["Completed"].(map[string]interface{})["value"]; got != 0 {
 		t.Fatalf("completed mismatch: got %#v", got)
 	}
+	if got := fields["Flagged"].(map[string]interface{})["value"]; got != 1 {
+		t.Fatalf("flagged mismatch: got %#v", got)
+	}
 	if got := fields["Priority"].(map[string]interface{})["value"]; got != models.PriorityMap["none"] {
 		t.Fatalf("priority mismatch: got %#v", got)
+	}
+}
+
+func TestBuildReminderFieldsPreservesExistingFlaggedState(t *testing.T) {
+	fields, err := buildReminderFields(&cache.ReminderData{
+		Title:   "Original title",
+		Flagged: true,
+	}, ReminderChanges{})
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+	if got := fields["Flagged"].(map[string]interface{})["value"]; got != 1 {
+		t.Fatalf("flagged mismatch: got %#v", got)
 	}
 }
 
@@ -142,6 +164,125 @@ func TestBuildReminderFieldsCanClearTags(t *testing.T) {
 	}
 }
 
+func TestBuildReminderFieldsCanReassignParent(t *testing.T) {
+	newParent := "Reminder/new-parent"
+	fields, err := buildReminderFields(&cache.ReminderData{
+		Title:     "Original title",
+		ParentRef: strPtr("Reminder/old-parent"),
+	}, ReminderChanges{
+		ParentRef: &newParent,
+	})
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+	if got := fields["ParentReminder"].(map[string]interface{})["value"].(map[string]interface{})["recordName"]; got != newParent {
+		t.Fatalf("parent ref mismatch: got %#v", got)
+	}
+
+	clear := ""
+	fields, err = buildReminderFields(&cache.ReminderData{
+		Title:     "Original title",
+		ParentRef: strPtr("Reminder/old-parent"),
+	}, ReminderChanges{
+		ParentRef: &clear,
+	})
+	if err != nil {
+		t.Fatalf("buildReminderFields clear: %v", err)
+	}
+	if _, ok := fields["ParentReminder"]; ok {
+		t.Fatal("expected parent reminder to be cleared")
+	}
+}
+
+func TestBuildReminderFieldsBumpsReminderResolutionTokens(t *testing.T) {
+	rawMap := `{"map":{"titleDocument":{"replicaID":"RID-1","counter":2,"modificationTime":10},"notesDocument":{"replicaID":"RID-2","counter":5,"modificationTime":20},"lastModifiedDate":{"replicaID":"RID-3","counter":7,"modificationTime":30}}}`
+	title := "Original title"
+	notes := "Old notes"
+	fields, err := buildReminderFields(
+		&cache.ReminderData{
+			Title: title,
+			Notes: &notes,
+		},
+		ReminderChanges{
+			Title: strPtr("Updated title"),
+			Notes: strPtr("Updated notes"),
+		},
+		map[string]interface{}{
+			"ResolutionTokenMap": map[string]interface{}{
+				"value": rawMap,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+
+	if _, ok := fields["LastModifiedDate"]; !ok {
+		t.Fatal("expected LastModifiedDate to be included")
+	}
+	rawResolution := fields["ResolutionTokenMap"].(map[string]interface{})["value"].(string)
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(rawResolution), &payload); err != nil {
+		t.Fatalf("resolution token map json: %v", err)
+	}
+	m := payload["map"].(map[string]interface{})
+	if got := int(m["titleDocument"].(map[string]interface{})["counter"].(float64)); got != 3 {
+		t.Fatalf("titleDocument counter mismatch: got %d", got)
+	}
+	if got := int(m["notesDocument"].(map[string]interface{})["counter"].(float64)); got != 6 {
+		t.Fatalf("notesDocument counter mismatch: got %d", got)
+	}
+	if got := int(m["lastModifiedDate"].(map[string]interface{})["counter"].(float64)); got != 8 {
+		t.Fatalf("lastModifiedDate counter mismatch: got %d", got)
+	}
+}
+
+func TestReferencedChildRecordNames(t *testing.T) {
+	fields := map[string]interface{}{
+		"AlarmIDs": map[string]interface{}{
+			"type":  "STRING_LIST",
+			"value": []interface{}{"10D6B475-F334-4912-BCA0-CEC1F3CE0B42"},
+		},
+		"AssignmentIDs": map[string]interface{}{
+			"type":  "EMPTY_LIST",
+			"value": []interface{}{},
+		},
+		"HashtagIDs": map[string]interface{}{
+			"type":  "STRING_LIST",
+			"value": []interface{}{"37F1680B-7F3D-4CD3-B501-30337A9CEDAD"},
+		},
+		"RecurrenceRuleIDs": map[string]interface{}{
+			"type":  "STRING_LIST",
+			"value": []interface{}{"ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB"},
+		},
+		"TriggerID": map[string]interface{}{
+			"type":  "STRING",
+			"value": "E974B8A8-ED00-41EE-BB2F-9DE92764C3A3",
+		},
+	}
+
+	got := referencedChildRecordNames(fields)
+	want := map[string]struct{}{
+		"Alarm/10D6B475-F334-4912-BCA0-CEC1F3CE0B42":          {},
+		"AlarmTrigger/E974B8A8-ED00-41EE-BB2F-9DE92764C3A3":   {},
+		"Hashtag/37F1680B-7F3D-4CD3-B501-30337A9CEDAD":        {},
+		"RecurrenceRule/ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB": {},
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected child record count: got %d want %d (%v)", len(got), len(want), got)
+	}
+	for _, recordName := range got {
+		if _, ok := want[recordName]; !ok {
+			t.Fatalf("unexpected child record name %q", recordName)
+		}
+		delete(want, recordName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing child record names: %v", want)
+	}
+}
+
 func TestBuildCreateListOpUsesListSchema(t *testing.T) {
 	op, recordName := buildCreateListOp("Sebastian")
 
@@ -168,6 +309,81 @@ func TestBuildCreateListOpUsesListSchema(t *testing.T) {
 	}
 	if got := fields["Name"].(map[string]interface{})["value"]; got != "Sebastian" {
 		t.Fatalf("name mismatch: got %#v", got)
+	}
+}
+
+func TestBuildCreateOpTimedDueAddsAlarmArtifacts(t *testing.T) {
+	ops, recordName, err := buildCreateOp("_owner", "Timed reminder", "List/abc", "", "2026-03-24T16:30", models.PriorityMap["medium"], "notes")
+	if err != nil {
+		t.Fatalf("buildCreateOp: %v", err)
+	}
+	if recordName == "" {
+		t.Fatal("expected recordName")
+	}
+	if len(ops) != 3 {
+		t.Fatalf("expected 3 ops for timed due, got %d", len(ops))
+	}
+
+	reminder := ops[0]["record"].(map[string]interface{})
+	fields := reminder["fields"].(map[string]interface{})
+	if got := fields["TimeZone"].(map[string]interface{})["value"]; got == "" {
+		t.Fatalf("expected timezone, got %#v", got)
+	}
+	alarmIDs := fields["AlarmIDs"].(map[string]interface{})
+	if got := alarmIDs["type"]; got != "STRING_LIST" {
+		t.Fatalf("expected STRING_LIST alarm ids, got %#v", got)
+	}
+
+	alarm := ops[1]["record"].(map[string]interface{})
+	alarmFields := alarm["fields"].(map[string]interface{})
+	if got := alarmFields["Reminder"].(map[string]interface{})["value"].(map[string]interface{})["recordName"]; got != recordName {
+		t.Fatalf("alarm reminder ref mismatch: got %#v", got)
+	}
+
+	trigger := ops[2]["record"].(map[string]interface{})
+	triggerFields := trigger["fields"].(map[string]interface{})
+	if got := triggerFields["Type"].(map[string]interface{})["value"]; got != "Date" {
+		t.Fatalf("trigger type mismatch: got %#v", got)
+	}
+}
+
+func TestBuildReminderEditPlanPreservesTimedDueArtifacts(t *testing.T) {
+	due := "2026-03-24T16:30"
+	changeTag := "ct-1"
+	liveFields := map[string]interface{}{
+		"AlarmIDs": map[string]interface{}{
+			"type":  "STRING_LIST",
+			"value": []interface{}{"ALARM-1"},
+		},
+		"TimeZone": map[string]interface{}{
+			"value": "America/Sao_Paulo",
+		},
+	}
+
+	ops, cleanup, err := buildReminderEditPlan("_owner", "Reminder/abc", &cache.ReminderData{
+		Title:     "Timed reminder",
+		Due:       &due,
+		ChangeTag: &changeTag,
+	}, ReminderChanges{
+		Notes: strPtr("updated"),
+	}, liveFields)
+	if err != nil {
+		t.Fatalf("buildReminderEditPlan: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected one replace op, got %d", len(ops))
+	}
+	if len(cleanup) != 0 {
+		t.Fatalf("expected no cleanup, got %v", cleanup)
+	}
+
+	fields := ops[0]["record"].(map[string]interface{})["fields"].(map[string]interface{})
+	if got := fields["TimeZone"].(map[string]interface{})["value"]; got != "America/Sao_Paulo" {
+		t.Fatalf("timezone mismatch: got %#v", got)
+	}
+	alarmIDs := fields["AlarmIDs"].(map[string]interface{})["value"].([]interface{})
+	if len(alarmIDs) != 1 || alarmIDs[0] != "ALARM-1" {
+		t.Fatalf("alarm ids mismatch: got %#v", alarmIDs)
 	}
 }
 
@@ -280,10 +496,71 @@ func TestNormalizeTagNames(t *testing.T) {
 	}
 }
 
+func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshPath := filepath.Join(tmpDir, "ssh")
+	callFile := filepath.Join(tmpDir, "calls")
+	script := "#!/bin/sh\n" +
+		"count=0\n" +
+		"if [ -f " + writerShellQuote(callFile) + " ]; then count=$(cat " + writerShellQuote(callFile) + "); fi\n" +
+		"count=$((count+1))\n" +
+		"printf '%s' \"$count\" > " + writerShellQuote(callFile) + "\n" +
+		"if [ \"$count\" -eq 1 ]; then printf '%s' '{\"ok\":true}'; else printf '%s' '{\"id\":\"x-apple-reminder://ABC\",\"title\":\"Updated title\",\"completed\":false,\"body\":\"Updated body\"}'; fi\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	defer os.Setenv("PATH", oldPath)
+
+	engine := &iclouddsync.Engine{
+		Cache: &cache.Cache{
+			Reminders: map[string]*cache.ReminderData{
+				"Reminder/ABC": {
+					Title: "Original title",
+					Notes: strPtr("Original body"),
+				},
+			},
+			Sections: map[string]*cache.SectionData{},
+			Hashtags: map[string]*cache.HashtagData{},
+			Lists:    map[string]string{},
+		},
+	}
+	w := &Writer{Sync: engine}
+	bridge := applebridge.New(&applebridge.Config{Host: "example-host", User: "tester", IdentityPath: "/tmp/key"})
+
+	result, err := w.SafeTextEditReminder("ABC", strPtr("Updated title"), strPtr("Updated body"), bridge)
+	if err != nil {
+		t.Fatalf("SafeTextEditReminder error: %v", err)
+	}
+	if errMsg, ok := result["error"].(string); ok {
+		t.Fatalf("unexpected result error: %s", errMsg)
+	}
+	rd := w.Sync.Cache.Reminders["Reminder/ABC"]
+	if rd == nil {
+		t.Fatal("expected updated cache entry")
+	}
+	if rd.Title != "Updated title" {
+		t.Fatalf("title mismatch: got %q", rd.Title)
+	}
+	if rd.Notes == nil || *rd.Notes != "Updated body" {
+		t.Fatalf("notes mismatch: %#v", rd.Notes)
+	}
+	if alias := w.Sync.Cache.Reminders["ABC"]; alias == nil || alias.Title != "Updated title" {
+		t.Fatalf("expected alias cache update, got %#v", alias)
+	}
+}
+
 func intPtr(v int) *int {
 	return &v
 }
 
 func strPtr(v string) *string {
 	return &v
+}
+
+func writerShellQuote(v string) string {
+	return "'" + filepath.ToSlash(v) + "'"
 }

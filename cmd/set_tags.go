@@ -22,7 +22,7 @@ var setTagsCmd = &cobra.Command{
 		if !setTagsClear && len(setTagsNames) == 0 {
 			return fmt.Errorf("--tag or --clear is required")
 		}
-		if err := syncEngine.Sync(false); err != nil {
+		if err := bestEffortSync(); err != nil && !shouldProceedWithoutSync(args[0]) {
 			return err
 		}
 		tags := setTagsNames

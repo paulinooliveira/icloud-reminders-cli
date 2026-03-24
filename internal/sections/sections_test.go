@@ -99,6 +99,35 @@ func TestRemoveMemberships(t *testing.T) {
 	}
 }
 
+func TestGroupIDForMember(t *testing.T) {
+	mf := &MembershipFile{
+		Memberships: []Membership{
+			{GroupID: "a", MemberID: "r1"},
+			{GroupID: "b", MemberID: "r2"},
+		},
+	}
+	if got := GroupIDForMember(mf, "r2"); got != "b" {
+		t.Fatalf("GroupIDForMember mismatch: got %q", got)
+	}
+	if got := GroupIDForMember(mf, "missing"); got != "" {
+		t.Fatalf("expected empty group for missing member, got %q", got)
+	}
+}
+
+func TestHasMembers(t *testing.T) {
+	mf := &MembershipFile{
+		Memberships: []Membership{
+			{GroupID: "a", MemberID: "r1"},
+		},
+	}
+	if !HasMembers(mf, "a") {
+		t.Fatal("expected section a to have members")
+	}
+	if HasMembers(mf, "b") {
+		t.Fatal("expected section b to be empty")
+	}
+}
+
 func TestRemoveSection(t *testing.T) {
 	mf := &MembershipFile{
 		Memberships: []Membership{

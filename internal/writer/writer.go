@@ -2,10 +2,12 @@
 package writer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/cache"
 	"icloud-reminders/internal/cloudkit"
 	"icloud-reminders/internal/logger"
@@ -28,8 +30,20 @@ type ReminderChanges struct {
 	Notes      *string
 	Priority   *int
 	Completed  *bool
+	Flagged    *bool
 	HashtagIDs *[]string
+	ParentRef  *string
 }
+
+type timedDueArtifacts struct {
+	AlarmID           string
+	AlarmRecordName   string
+	TriggerID         string
+	TriggerRecordName string
+	TimeZone          string
+}
+
+var deleteVerifyBackoff = []time.Duration{0, 150 * time.Millisecond, 400 * time.Millisecond}
 
 // New creates a new Writer.
 func New(ck *cloudkit.Client, engine *sync.Engine) *Writer {
@@ -140,13 +154,13 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 
 	priorityVal := models.PriorityMap[priority]
 
-	op, recordName, err := buildCreateOp(title, listID, parentRef, dueDate, priorityVal, notes)
+	ops, recordName, err := buildCreateOp(ownerID, title, listID, parentRef, dueDate, priorityVal, notes)
 	if err != nil {
 		return errResult(err), nil
 	}
 
 	logger.Debugf("add: creating record %s in list %s", recordName, listID)
-	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, ops)
 	if err != nil {
 		return errResult(err), nil
 	}
@@ -229,11 +243,11 @@ func (w *Writer) AddRemindersBatch(titles []string, listName, parentID string) (
 	var createdList []created
 
 	for _, title := range titles {
-		op, recordName, err := buildCreateOp(title, listID, parentRef, "", 0, "")
+		createOps, recordName, err := buildCreateOp(ownerID, title, listID, parentRef, "", 0, "")
 		if err != nil {
 			return errResult(err), nil
 		}
-		ops = append(ops, op)
+		ops = append(ops, createOps...)
 		createdList = append(createdList, created{recordName, title})
 	}
 
@@ -281,12 +295,10 @@ func (w *Writer) CompleteReminder(reminderID string) (map[string]interface{}, er
 		return errResult(err), nil
 	}
 
-	fullID := w.Sync.FindReminderByID(reminderID)
-	if fullID == "" {
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
 		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
 	}
-
-	rd := w.Sync.Cache.Reminders[fullID]
 	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
 		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
 	}
@@ -337,41 +349,262 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 		return errResult(err), nil
 	}
 
-	fullID := w.Sync.FindReminderByID(reminderID)
-	if fullID == "" {
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
 		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
 	}
-
-	rd := w.Sync.Cache.Reminders[fullID]
 	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
 		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
 	}
 
-	op := map[string]interface{}{
-		"operationType": "delete",
-		"record": map[string]interface{}{
-			"recordName":      fullID,
-			"recordChangeTag": *rd.ChangeTag,
-		},
+	record, err := lookupRecord(w.CK, ownerID, fullID)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if ct, _ := record["recordChangeTag"].(string); ct != "" {
+		rd.ChangeTag = &ct
+	}
+	fields, _ := record["fields"].(map[string]interface{})
+
+	seenChildren := make(map[string]struct{})
+	if err := w.deleteChildRecordsRecursive(ownerID, fields, seenChildren); err != nil {
+		return errResult(err), nil
 	}
 
 	title := ""
 	if rd != nil {
 		title = rd.Title
 	}
-	logger.Debugf("delete: removing record %s", fullID)
-	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
-	if err != nil {
-		return errResult(err), nil
-	}
-	if _, hasErr := result["error"]; !hasErr {
-		delete(w.Sync.Cache.Reminders, fullID)
-		if err := w.Sync.Cache.Save(); err != nil {
-			logger.Warnf("cache save failed: %v", err)
+	currentSectionID := ""
+	if rd != nil && rd.ListRef != nil && *rd.ListRef != "" {
+		if sectionID, sectionErr := w.sectionIDForReminder(ownerID, *rd.ListRef, shortID(fullID)); sectionErr == nil {
+			currentSectionID = sectionID
 		}
-		logger.Infof("Deleted reminder: %q (%s)", title, reminderID)
 	}
-	return result, nil
+	for attempt := 0; attempt < 8; attempt++ {
+		op := map[string]interface{}{
+			"operationType": "delete",
+			"record": map[string]interface{}{
+				"recordName":      fullID,
+				"recordChangeTag": *rd.ChangeTag,
+			},
+		}
+
+		logger.Debugf("delete: removing record %s", fullID)
+		result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
+		if err == nil {
+			if verifyErr := w.verifyReminderDeleted(ownerID, fullID); verifyErr != nil {
+				return errResult(verifyErr), nil
+			}
+			if rd.ListRef != nil && *rd.ListRef != "" {
+				if clearErr := w.applySectionMembership(ownerID, *rd.ListRef, "", []string{shortID(fullID)}, true); clearErr != nil {
+					logger.Warnf("delete: failed to clear section membership for %s: %v", fullID, clearErr)
+				}
+				if currentSectionID != "" {
+					if cleanupErr := w.deleteSectionIfEmpty(ownerID, *rd.ListRef, currentSectionID); cleanupErr != nil {
+						logger.Warnf("delete: failed to delete empty section %s after removing %s: %v", currentSectionID, fullID, cleanupErr)
+					}
+				}
+			}
+			for _, alias := range cache.ReminderAliases(fullID) {
+				delete(w.Sync.Cache.Reminders, alias)
+			}
+			if err := w.Sync.Cache.Save(); err != nil {
+				logger.Warnf("cache save failed: %v", err)
+			}
+			logger.Infof("Deleted reminder: %q (%s)", title, reminderID)
+			return result, nil
+		}
+
+		blockingRecord := extractBlockingRecordName(err)
+		if blockingRecord == "" {
+			return errResult(err), nil
+		}
+		if _, alreadyTried := seenChildren[blockingRecord]; alreadyTried {
+			return errResult(err), nil
+		}
+		logger.Debugf("delete: resolving validating reference via %s", blockingRecord)
+		if err := w.deleteRecordRecursiveByName(ownerID, blockingRecord, seenChildren); err != nil {
+			return errResult(err), nil
+		}
+	}
+	return errResult(fmt.Errorf("delete reminder %s exceeded child cleanup retries", reminderID)), nil
+}
+
+func (w *Writer) verifyReminderDeleted(ownerID, recordName string) error {
+	var lastErr error
+	for attempt, delay := range deleteVerifyBackoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		records, err := w.CK.LookupRecords(ownerID, []string{recordName})
+		if err != nil {
+			lastErr = err
+			if attempt == len(deleteVerifyBackoff)-1 {
+				return fmt.Errorf("delete verification lookup failed for %s: %w", recordName, err)
+			}
+			continue
+		}
+		if len(records) == 0 {
+			return nil
+		}
+		record := records[0]
+		if code, _ := record["serverErrorCode"].(string); code != "" {
+			if isMissingRecordCode(code) {
+				return nil
+			}
+			reason, _ := record["reason"].(string)
+			lastErr = fmt.Errorf("CloudKit error %s: %s", code, reason)
+			if attempt == len(deleteVerifyBackoff)-1 {
+				return fmt.Errorf("delete verification lookup failed for %s: %w", recordName, lastErr)
+			}
+			continue
+		}
+		if deleted, _ := record["deleted"].(bool); deleted {
+			return nil
+		}
+		fields, _ := record["fields"].(map[string]interface{})
+		if getFieldIntValue(fields, "Deleted") != 0 {
+			return nil
+		}
+		if attempt == len(deleteVerifyBackoff)-1 {
+			return fmt.Errorf("delete verification failed for %s: record still present after delete", recordName)
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("delete verification lookup failed for %s: %w", recordName, lastErr)
+	}
+	return nil
+}
+
+func isMissingRecordCode(code string) bool {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "NOT_FOUND", "UNKNOWN_ITEM":
+		return true
+	default:
+		return false
+	}
+}
+
+var childReferencePrefixes = map[string]string{
+	"AlarmIDs":          "Alarm/",
+	"AssignmentIDs":     "Assignment/",
+	"AttachmentIDs":     "Attachment/",
+	"RecurrenceRuleIDs": "RecurrenceRule/",
+	"HashtagIDs":        "Hashtag/",
+}
+
+var singleChildReferencePrefixes = map[string]string{
+	"TriggerID": "AlarmTrigger/",
+}
+
+func referencedChildRecordNames(fields map[string]interface{}) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for fieldName, prefix := range childReferencePrefixes {
+		ids, ok := getStringListField(fields, fieldName)
+		if !ok {
+			continue
+		}
+		for _, id := range ids {
+			recordName := prefix + shortID(id)
+			if _, exists := seen[recordName]; exists {
+				continue
+			}
+			seen[recordName] = struct{}{}
+			out = append(out, recordName)
+		}
+	}
+	for fieldName, prefix := range singleChildReferencePrefixes {
+		id := shortID(getFieldStringValue(fields, fieldName))
+		if id == "" {
+			continue
+		}
+		recordName := prefix + id
+		if _, exists := seen[recordName]; exists {
+			continue
+		}
+		seen[recordName] = struct{}{}
+		out = append(out, recordName)
+	}
+	return out
+}
+
+func (w *Writer) deleteChildRecordsRecursive(ownerID string, fields map[string]interface{}, seen map[string]struct{}) error {
+	for _, recordName := range referencedChildRecordNames(fields) {
+		if err := w.deleteRecordRecursiveByName(ownerID, recordName, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *Writer) cleanupDeletedChildCacheEntries(recordNames []string) {
+	for _, recordName := range recordNames {
+		switch {
+		case strings.HasPrefix(recordName, "Hashtag/"):
+			delete(w.Sync.Cache.Hashtags, recordName)
+		}
+	}
+}
+
+func (w *Writer) deleteRecordRecursiveByName(ownerID, recordName string, seen map[string]struct{}) error {
+	if _, exists := seen[recordName]; exists {
+		return nil
+	}
+	seen[recordName] = struct{}{}
+
+	record, err := lookupRecord(w.CK, ownerID, recordName)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "not found") || strings.Contains(lower, "unknown item") {
+			return nil
+		}
+		return err
+	}
+
+	recordFields, _ := record["fields"].(map[string]interface{})
+	if err := w.deleteChildRecordsRecursive(ownerID, recordFields, seen); err != nil {
+		return err
+	}
+
+	changeTag, _ := record["recordChangeTag"].(string)
+	if changeTag == "" {
+		return nil
+	}
+	logger.Debugf("delete: removing child record %s", recordName)
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
+		"operationType": "delete",
+		"record": map[string]interface{}{
+			"recordName":      recordName,
+			"recordChangeTag": changeTag,
+		},
+	}})
+	if err != nil {
+		return err
+	}
+	if _, hasErr := result["error"]; hasErr {
+		return fmt.Errorf("delete child record %s failed", recordName)
+	}
+	w.cleanupDeletedChildCacheEntries([]string{recordName})
+	return nil
+}
+
+func extractBlockingRecordName(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	idx := strings.Index(msg, "recordID=")
+	if idx == -1 {
+		return ""
+	}
+	rest := msg[idx+len("recordID="):]
+	end := strings.Index(rest, ",")
+	if end == -1 {
+		end = len(rest)
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 // EditReminder updates one or more fields on an existing reminder.
@@ -382,39 +615,53 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 		return errResult(err), nil
 	}
 
-	fullID := w.Sync.FindReminderByID(reminderID)
-	if fullID == "" {
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
 		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
 	}
-
-	rd := w.Sync.Cache.Reminders[fullID]
 	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
 		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
 	}
 
-	if changes.Title == nil && changes.DueDate == nil && changes.Notes == nil && changes.Priority == nil && changes.Completed == nil && changes.HashtagIDs == nil {
-		return errResult(fmt.Errorf("no changes specified — use --title, --due, --notes, --priority, or tag changes")), nil
+	if changes.Title == nil && changes.DueDate == nil && changes.Notes == nil && changes.Priority == nil && changes.Completed == nil && changes.Flagged == nil && changes.HashtagIDs == nil && changes.ParentRef == nil {
+		return errResult(fmt.Errorf("no changes specified — use --title, --due, --notes, --priority, --flagged, --unflagged, --parent, or tag changes")), nil
 	}
 
-	fields, err := buildReminderFields(rd, changes)
+	record, err := lookupRecord(w.CK, ownerID, fullID)
 	if err != nil {
 		return errResult(err), nil
 	}
+	liveReminder := reminderDataFromRecord(record)
+	if liveReminder == nil {
+		return errResult(fmt.Errorf("failed to decode live reminder %s", fullID)), nil
+	}
+	rd = liveReminder
+	w.Sync.Cache.Reminders[fullID] = rd
+	recordFields, _ := record["fields"].(map[string]interface{})
 
-	op := map[string]interface{}{
-		"operationType": "replace",
-		"record": map[string]interface{}{
-			"recordType":      "Reminder",
-			"recordName":      fullID,
-			"recordChangeTag": *rd.ChangeTag,
-			"fields":          fields,
-		},
+	ops, cleanup, err := buildReminderEditPlan(ownerID, fullID, rd, changes, recordFields)
+	if err != nil {
+		return errResult(err), nil
 	}
 
 	logger.Debugf("edit: updating record %s", fullID)
-	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
+	result, err := w.modifyRecordsWithRetry(ownerID, ops)
 	if err != nil {
 		return errResult(err), nil
+	}
+
+	seenCleanup := map[string]struct{}{}
+	for _, recordName := range cleanup {
+		if recordName == "" {
+			continue
+		}
+		if _, ok := seenCleanup[recordName]; ok {
+			continue
+		}
+		seenCleanup[recordName] = struct{}{}
+		if err := w.deleteRecordRecursiveByName(ownerID, recordName, map[string]struct{}{}); err != nil {
+			logger.Warnf("edit: failed to clean up child record %s: %v", recordName, err)
+		}
 	}
 
 	// Update local cache
@@ -436,14 +683,65 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 	return result, nil
 }
 
+func (w *Writer) SafeTextEditReminder(reminderID string, title, notes *string, bridge *applebridge.Bridge) (map[string]interface{}, error) {
+	if bridge == nil {
+		return errResult(fmt.Errorf("apple bridge is required for safe text edits")), nil
+	}
+	if title == nil && notes == nil {
+		return errResult(fmt.Errorf("no text changes specified")), nil
+	}
+
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
+		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
+	}
+	if rd == nil {
+		return errResult(fmt.Errorf("failed to resolve reminder '%s'", reminderID)), nil
+	}
+
+	appleID := "x-apple-reminder://" + shortID(fullID)
+	if err := bridge.UpdateReminder(appleID, title, notes, nil); err != nil {
+		return errResult(err), nil
+	}
+
+	live, err := bridge.GetReminder(appleID)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if live == nil {
+		return errResult(fmt.Errorf("apple bridge returned no reminder for %s", appleID)), nil
+	}
+	if title != nil && live.Title != *title {
+		return errResult(fmt.Errorf("safe text edit verification failed for %s: title mismatch", reminderID)), nil
+	}
+	if notes != nil && live.Body != *notes {
+		return errResult(fmt.Errorf("safe text edit verification failed for %s: notes mismatch", reminderID)), nil
+	}
+
+	applyReminderChanges(rd, ReminderChanges{Title: title, Notes: notes})
+	now := time.Now().UnixMilli()
+	rd.ModifiedTS = &now
+	for _, alias := range cache.ReminderAliases(fullID) {
+		w.Sync.Cache.Reminders[alias] = rd
+	}
+	if err := w.Sync.Cache.Save(); err != nil {
+		logger.Warnf("cache save failed: %v", err)
+	}
+
+	return map[string]interface{}{
+		"id":       fullID,
+		"apple_id": appleID,
+	}, nil
+}
+
 // ReopenReminder marks a reminder as to-do again and clears its completion date.
 func (w *Writer) ReopenReminder(reminderID string) (map[string]interface{}, error) {
 	incomplete := false
 	return w.EditReminder(reminderID, ReminderChanges{Completed: &incomplete})
 }
 
-// buildCreateOp builds a CloudKit create operation for a new reminder.
-func buildCreateOp(title, listID, parentRef, dueDate string, priority int, notes string) (map[string]interface{}, string, error) {
+// buildCreateOp builds CloudKit create operations for a new reminder.
+func buildCreateOp(ownerID, title, listID, parentRef, dueDate string, priority int, notes string) ([]map[string]interface{}, string, error) {
 	encoded, err := utils.EncodeTitle(title)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode title: %w", err)
@@ -474,10 +772,29 @@ func buildCreateOp(title, listID, parentRef, dueDate string, priority int, notes
 	}
 
 	if dueDate != "" {
-		ts, err := utils.StrToTs(dueDate)
-		if err == nil {
-			fields["DueDate"] = map[string]interface{}{"value": ts}
+		spec, err := utils.ParseDue(dueDate)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid due date %q: %w", dueDate, err)
 		}
+		fields["DueDate"] = map[string]interface{}{"value": spec.Timestamp}
+		if spec.HasTime {
+			artifacts, childOps, err := buildTimedDueChildOps(ownerID, recordName, spec)
+			if err != nil {
+				return nil, "", err
+			}
+			fields["TimeZone"] = map[string]interface{}{"value": artifacts.TimeZone}
+			fields["AlarmIDs"] = stringListField([]string{artifacts.AlarmID})
+			reminderOp := map[string]interface{}{
+				"operationType": "create",
+				"record": map[string]interface{}{
+					"recordType": "Reminder",
+					"recordName": recordName,
+					"fields":     fields,
+				},
+			}
+			return append([]map[string]interface{}{reminderOp}, childOps...), recordName, nil
+		}
+		fields["AlarmIDs"] = emptyListField()
 	}
 
 	if priority != 0 {
@@ -500,7 +817,58 @@ func buildCreateOp(title, listID, parentRef, dueDate string, priority int, notes
 			"fields":     fields,
 		},
 	}
-	return op, recordName, nil
+	return []map[string]interface{}{op}, recordName, nil
+}
+
+func buildTimedDueChildOps(ownerID, reminderRecordName string, spec utils.DueSpec) (timedDueArtifacts, []map[string]interface{}, error) {
+	alarmID := utils.NewUUIDString()
+	alarmRecordName := "Alarm/" + alarmID
+	triggerID := utils.NewUUIDString()
+	triggerRecordName := "AlarmTrigger/" + triggerID
+
+	dateComponents, err := utils.EncodeDateComponents(spec)
+	if err != nil {
+		return timedDueArtifacts{}, nil, fmt.Errorf("encode date components: %w", err)
+	}
+
+	alarmOp := map[string]interface{}{
+		"operationType": "create",
+		"record": map[string]interface{}{
+			"recordType": "Alarm",
+			"recordName": alarmRecordName,
+			"fields": map[string]interface{}{
+				"AlarmUID":                      map[string]interface{}{"value": alarmID},
+				"DueDateResolutionTokenAsNonce": map[string]interface{}{"value": float64(time.Now().UnixNano()) / 1e7, "type": "NUMBER_DOUBLE"},
+				"Reminder":                      validateRecordRef(reminderRecordName, ownerID),
+				"TriggerID":                     map[string]interface{}{"value": triggerID},
+				"Imported":                      map[string]interface{}{"value": 0},
+				"Deleted":                       map[string]interface{}{"value": 0},
+			},
+		},
+	}
+
+	triggerOp := map[string]interface{}{
+		"operationType": "create",
+		"record": map[string]interface{}{
+			"recordType": "AlarmTrigger",
+			"recordName": triggerRecordName,
+			"fields": map[string]interface{}{
+				"DateComponentsData": map[string]interface{}{"value": dateComponents, "type": "BYTES"},
+				"Type":               map[string]interface{}{"value": "Date"},
+				"Alarm":              validateRecordRef(alarmRecordName, ownerID),
+				"Imported":           map[string]interface{}{"value": 0},
+				"Deleted":            map[string]interface{}{"value": 0},
+			},
+		},
+	}
+
+	return timedDueArtifacts{
+		AlarmID:           alarmID,
+		AlarmRecordName:   alarmRecordName,
+		TriggerID:         triggerID,
+		TriggerRecordName: triggerRecordName,
+		TimeZone:          spec.TimeZone,
+	}, []map[string]interface{}{alarmOp, triggerOp}, nil
 }
 
 func buildCreateListOp(name string) (map[string]interface{}, string) {
@@ -535,14 +903,247 @@ func resolveParentRef(engine *sync.Engine, parentHint string, listID string) str
 	return ""
 }
 
+func (w *Writer) resolveReminderRecord(reminderHint string) (string, *cache.ReminderData, error) {
+	if rid := w.Sync.FindReminderByID(reminderHint); rid != "" {
+		return w.canonicalizeReminderRecord(rid, w.Sync.Cache.Reminders[rid])
+	}
+	if rid := w.Sync.FindReminderByTitle(reminderHint, "", false); rid != "" {
+		return w.canonicalizeReminderRecord(rid, w.Sync.Cache.Reminders[rid])
+	}
+
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return "", nil, err
+	}
+	for _, recordName := range reminderLookupCandidates(reminderHint) {
+		record, err := lookupRecord(w.CK, ownerID, recordName)
+		if err != nil {
+			continue
+		}
+		fullID, _ := record["recordName"].(string)
+		if fullID == "" {
+			fullID = recordName
+		}
+		rd := reminderDataFromRecord(record)
+		w.Sync.Cache.Reminders[fullID] = rd
+		return fullID, rd, nil
+	}
+	return "", nil, fmt.Errorf("reminder %q not found", reminderHint)
+}
+
+func (w *Writer) canonicalizeReminderRecord(recordName string, rd *cache.ReminderData) (string, *cache.ReminderData, error) {
+	if strings.Contains(recordName, "/") || !looksLikeUUID(recordName) {
+		return recordName, rd, nil
+	}
+
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return recordName, rd, err
+	}
+	for _, candidate := range reminderLookupCandidates(recordName) {
+		record, err := lookupRecord(w.CK, ownerID, candidate)
+		if err != nil {
+			continue
+		}
+		fullID, _ := record["recordName"].(string)
+		if fullID == "" {
+			fullID = candidate
+		}
+		live := reminderDataFromRecord(record)
+		if rd != nil {
+			if live.ChangeTag == nil || *live.ChangeTag == "" {
+				live.ChangeTag = rd.ChangeTag
+			}
+			if live.ListRef == nil {
+				live.ListRef = rd.ListRef
+			}
+			if live.ParentRef == nil {
+				live.ParentRef = rd.ParentRef
+			}
+			if live.Notes == nil {
+				live.Notes = rd.Notes
+			}
+			if len(live.HashtagIDs) == 0 {
+				live.HashtagIDs = append([]string(nil), rd.HashtagIDs...)
+			}
+			if live.Due == nil {
+				live.Due = rd.Due
+			}
+			if live.Priority == 0 {
+				live.Priority = rd.Priority
+			}
+		}
+		w.Sync.Cache.Reminders[fullID] = live
+		return fullID, live, nil
+	}
+	return recordName, rd, nil
+}
+
+func reminderLookupCandidates(hint string) []string {
+	candidates := make([]string, 0, 2)
+	seen := map[string]struct{}{}
+	add := func(recordName string) {
+		if recordName == "" {
+			return
+		}
+		if _, ok := seen[recordName]; ok {
+			return
+		}
+		seen[recordName] = struct{}{}
+		candidates = append(candidates, recordName)
+	}
+
+	if strings.HasPrefix(hint, "Reminder/") {
+		add(hint)
+		add(shortID(hint))
+		return candidates
+	}
+	if looksLikeUUID(hint) {
+		add("Reminder/" + strings.ToUpper(hint))
+		add(strings.ToUpper(hint))
+	}
+	return candidates
+}
+
+func reminderDataFromRecord(record map[string]interface{}) *cache.ReminderData {
+	fields, _ := record["fields"].(map[string]interface{})
+	if fields == nil {
+		fields = map[string]interface{}{}
+	}
+
+	title := utils.ExtractTitle(getFieldStringValue(fields, "TitleDocument"))
+	if title == "" {
+		title = "(untitled)"
+	}
+
+	var dueStr, completionStr *string
+	if due := getFieldInt64Value(fields, "DueDate"); due != 0 {
+		s := utils.TsToStr(due)
+		dueStr = &s
+	}
+	if cd := getFieldInt64Value(fields, "CompletionDate"); cd != 0 {
+		s := utils.TsToStr(cd)
+		completionStr = &s
+	}
+
+	listRef := getReferenceRecordName(fields, "List")
+	parentRef := getReferenceRecordName(fields, "ParentReminder")
+	hashtagIDs, _ := getStringListField(fields, "HashtagIDs")
+	notes := utils.ExtractTitle(getFieldStringValue(fields, "NotesDocument"))
+	priority := getFieldIntValue(fields, "Priority")
+	changeTag, _ := record["recordChangeTag"].(string)
+
+	modified, _ := record["modified"].(map[string]interface{})
+	var modTS *int64
+	if ts, ok := modified["timestamp"].(float64); ok {
+		v := int64(ts)
+		modTS = &v
+	}
+
+	rd := &cache.ReminderData{
+		Title:          title,
+		Completed:      getFieldIntValue(fields, "Completed") != 0,
+		Flagged:        getFieldIntValue(fields, "Flagged") != 0,
+		CompletionDate: completionStr,
+		Due:            dueStr,
+		Priority:       priority,
+		ModifiedTS:     modTS,
+	}
+	if notes != "" {
+		rd.Notes = &notes
+	}
+	if len(hashtagIDs) > 0 {
+		rd.HashtagIDs = append([]string(nil), hashtagIDs...)
+	}
+	if listRef != "" {
+		rd.ListRef = &listRef
+	}
+	if parentRef != "" {
+		rd.ParentRef = &parentRef
+	}
+	if changeTag != "" {
+		rd.ChangeTag = &changeTag
+	}
+	return rd
+}
+
 func errResult(err error) map[string]interface{} {
 	return map[string]interface{}{"error": err.Error()}
 }
 
-func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (map[string]interface{}, error) {
+func buildReminderEditPlan(ownerID, fullID string, current *cache.ReminderData, changes ReminderChanges, liveFields map[string]interface{}) ([]map[string]interface{}, []string, error) {
+	fields, err := buildReminderFields(current, changes, liveFields)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	existingAlarmIDs, _ := getStringListField(liveFields, "AlarmIDs")
+	existingTimeZone := getFieldStringValue(liveFields, "TimeZone")
+	cleanup := make([]string, 0)
+
+	finalDue := current.Due
+	if changes.DueDate != nil {
+		if *changes.DueDate == "" {
+			finalDue = nil
+		} else {
+			finalDue = changes.DueDate
+		}
+	}
+
+	var extraOps []map[string]interface{}
+	if finalDue != nil && *finalDue != "" {
+		spec, err := utils.ParseDue(*finalDue)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid due date %q (expected YYYY-MM-DD, YYYY-MM-DDTHH:MM, or RFC3339): %w", *finalDue, err)
+		}
+		fields["DueDate"] = map[string]interface{}{"value": spec.Timestamp}
+		if spec.HasTime {
+			if changes.DueDate == nil && len(existingAlarmIDs) > 0 {
+				fields["AlarmIDs"] = stringListField(existingAlarmIDs)
+				if existingTimeZone != "" {
+					fields["TimeZone"] = map[string]interface{}{"value": existingTimeZone}
+				}
+			} else {
+				artifacts, childOps, err := buildTimedDueChildOps(ownerID, fullID, spec)
+				if err != nil {
+					return nil, nil, err
+				}
+				fields["AlarmIDs"] = stringListField([]string{artifacts.AlarmID})
+				fields["TimeZone"] = map[string]interface{}{"value": artifacts.TimeZone}
+				extraOps = append(extraOps, childOps...)
+				cleanup = append(cleanup, referencedChildRecordNames(liveFields)...)
+			}
+		} else {
+			fields["AlarmIDs"] = emptyListField()
+			delete(fields, "TimeZone")
+			cleanup = append(cleanup, referencedChildRecordNames(liveFields)...)
+		}
+	} else {
+		delete(fields, "DueDate")
+		fields["AlarmIDs"] = emptyListField()
+		delete(fields, "TimeZone")
+		cleanup = append(cleanup, referencedChildRecordNames(liveFields)...)
+	}
+
+	op := map[string]interface{}{
+		"operationType": "replace",
+		"record": map[string]interface{}{
+			"recordType":      "Reminder",
+			"recordName":      fullID,
+			"recordChangeTag": *current.ChangeTag,
+			"fields":          fields,
+		},
+	}
+
+	return append([]map[string]interface{}{op}, extraOps...), cleanup, nil
+}
+
+func buildReminderFields(current *cache.ReminderData, changes ReminderChanges, liveFields ...map[string]interface{}) (map[string]interface{}, error) {
 	title := current.Title
+	touchedKeys := make([]string, 0, 7)
 	if changes.Title != nil {
 		title = *changes.Title
+		touchedKeys = append(touchedKeys, "titleDocument")
 	}
 	if title == "" {
 		return nil, fmt.Errorf("title cannot be empty")
@@ -555,16 +1156,25 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 	completed := current.Completed
 	if changes.Completed != nil {
 		completed = *changes.Completed
+		touchedKeys = append(touchedKeys, "completed", "completionDate")
+	}
+
+	flagged := current.Flagged
+	if changes.Flagged != nil {
+		flagged = *changes.Flagged
+		touchedKeys = append(touchedKeys, "flagged")
 	}
 
 	priority := current.Priority
 	if changes.Priority != nil {
 		priority = *changes.Priority
+		touchedKeys = append(touchedKeys, "priority")
 	}
 
 	fields := map[string]interface{}{
 		"TitleDocument": map[string]interface{}{"value": encodedTitle},
 		"Completed":     map[string]interface{}{"value": boolToInt(completed)},
+		"Flagged":       map[string]interface{}{"value": boolToInt(flagged)},
 		"Priority":      map[string]interface{}{"value": priority},
 	}
 
@@ -573,6 +1183,14 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 	}
 	if current.ParentRef != nil && *current.ParentRef != "" {
 		fields["ParentReminder"] = recordRef(*current.ParentRef)
+	}
+	if changes.ParentRef != nil {
+		touchedKeys = append(touchedKeys, "parentReminder")
+		if *changes.ParentRef == "" {
+			delete(fields, "ParentReminder")
+		} else {
+			fields["ParentReminder"] = recordRef(*changes.ParentRef)
+		}
 	}
 
 	hashtagIDs := append([]string(nil), current.HashtagIDs...)
@@ -597,6 +1215,7 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 
 	due := current.Due
 	if changes.DueDate != nil {
+		touchedKeys = append(touchedKeys, "dueDate", "alarmIDs", "timeZone")
 		if *changes.DueDate == "" {
 			due = nil
 		} else {
@@ -606,13 +1225,14 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 	if due != nil && *due != "" {
 		ts, err := utils.StrToTs(*due)
 		if err != nil {
-			return nil, fmt.Errorf("invalid due date %q (expected YYYY-MM-DD): %w", *due, err)
+			return nil, fmt.Errorf("invalid due date %q (expected YYYY-MM-DD, YYYY-MM-DDTHH:MM, or RFC3339): %w", *due, err)
 		}
 		fields["DueDate"] = map[string]interface{}{"value": ts}
 	}
 
 	notes := current.Notes
 	if changes.Notes != nil {
+		touchedKeys = append(touchedKeys, "notesDocument")
 		if *changes.Notes == "" {
 			notes = nil
 		} else {
@@ -639,7 +1259,83 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 		fields["CompletionDate"] = map[string]interface{}{"value": ts}
 	}
 
+	if len(liveFields) > 0 && liveFields[0] != nil && len(touchedKeys) > 0 {
+		nowMillis := time.Now().UnixMilli()
+		fields["LastModifiedDate"] = map[string]interface{}{
+			"value": nowMillis,
+			"type":  "TIMESTAMP",
+		}
+		fields["ResolutionTokenMap"] = map[string]interface{}{
+			"value": bumpReminderResolutionTokenMap(liveFields[0], touchedKeys, nowMillis),
+			"type":  "STRING",
+		}
+	}
+
 	return fields, nil
+}
+
+func bumpReminderResolutionTokenMap(fields map[string]interface{}, keys []string, nowMillis int64) string {
+	raw := getFieldStringValue(fields, "ResolutionTokenMap")
+	payload := map[string]interface{}{}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			payload = map[string]interface{}{}
+		}
+	}
+	m, _ := payload["map"].(map[string]interface{})
+	if m == nil {
+		m = map[string]interface{}{}
+		payload["map"] = m
+	}
+
+	replicaID := reminderReplicaID(m)
+	seen := map[string]struct{}{}
+	for _, key := range append(keys, "lastModifiedDate") {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		entry, _ := m[key].(map[string]interface{})
+		if entry == nil {
+			entry = map[string]interface{}{}
+			m[key] = entry
+		}
+		counter := 0
+		switch v := entry["counter"].(type) {
+		case float64:
+			counter = int(v)
+		case int:
+			counter = v
+		}
+		entry["counter"] = counter + 1
+		entry["modificationTime"] = float64(nowMillis)/1000 - 978307200
+		if existing, _ := entry["replicaID"].(string); existing != "" {
+			continue
+		}
+		entry["replicaID"] = replicaID
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func reminderReplicaID(m map[string]interface{}) string {
+	for _, raw := range m {
+		entry, _ := raw.(map[string]interface{})
+		if entry == nil {
+			continue
+		}
+		if replicaID, _ := entry["replicaID"].(string); replicaID != "" {
+			return replicaID
+		}
+	}
+	return "D25A1933-3DDF-4573-8177-B051D76C2E5B"
 }
 
 func applyReminderChanges(current *cache.ReminderData, changes ReminderChanges) {
@@ -663,8 +1359,18 @@ func applyReminderChanges(current *cache.ReminderData, changes ReminderChanges) 
 	if changes.Priority != nil {
 		current.Priority = *changes.Priority
 	}
+	if changes.Flagged != nil {
+		current.Flagged = *changes.Flagged
+	}
 	if changes.HashtagIDs != nil {
 		current.HashtagIDs = append([]string(nil), (*changes.HashtagIDs)...)
+	}
+	if changes.ParentRef != nil {
+		if *changes.ParentRef == "" {
+			current.ParentRef = nil
+		} else {
+			current.ParentRef = changes.ParentRef
+		}
 	}
 	if changes.Completed != nil {
 		current.Completed = *changes.Completed
@@ -688,6 +1394,39 @@ func recordRef(recordName string) map[string]interface{} {
 	}
 }
 
+func validateRecordRef(recordName, ownerID string) map[string]interface{} {
+	return map[string]interface{}{
+		"value": map[string]interface{}{
+			"recordName": recordName,
+			"action":     "VALIDATE",
+			"zoneID": map[string]interface{}{
+				"zoneName":        cloudkit.Zone,
+				"ownerRecordName": ownerID,
+				"zoneType":        "REGULAR_CUSTOM_ZONE",
+			},
+		},
+		"type": "REFERENCE",
+	}
+}
+
+func stringListField(ids []string) map[string]interface{} {
+	items := make([]interface{}, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, strings.TrimPrefix(id, "Alarm/"))
+	}
+	return map[string]interface{}{
+		"value": items,
+		"type":  "STRING_LIST",
+	}
+}
+
+func emptyListField() map[string]interface{} {
+	return map[string]interface{}{
+		"value": []interface{}{},
+		"type":  "EMPTY_LIST",
+	}
+}
+
 func boolToInt(v bool) int {
 	if v {
 		return 1
@@ -697,7 +1436,14 @@ func boolToInt(v bool) int {
 
 func (w *Writer) modifyRecordsWithRetry(ownerID string, operations []map[string]interface{}) (map[string]interface{}, error) {
 	var lastErr error
-	backoffs := []time.Duration{0, 250 * time.Millisecond, 750 * time.Millisecond}
+	backoffs := []time.Duration{
+		0,
+		500 * time.Millisecond,
+		1500 * time.Millisecond,
+		3 * time.Second,
+		6 * time.Second,
+		10 * time.Second,
+	}
 	for attempt, delay := range backoffs {
 		if delay > 0 {
 			time.Sleep(delay)
@@ -746,5 +1492,9 @@ func isZoneBusy(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "ZONE_BUSY")
+	msg := err.Error()
+	return strings.Contains(msg, "ZONE_BUSY") ||
+		strings.Contains(msg, "OP_LOCK_FAILURE") ||
+		strings.Contains(msg, "SERVER_OVERLOADED") ||
+		cloudkit.Is503(err)
 }

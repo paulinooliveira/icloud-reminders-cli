@@ -17,15 +17,10 @@ func (w *Writer) SetReminderTags(reminderID string, tagNames []string) (map[stri
 		return errResult(err), nil
 	}
 
-	fullID := w.Sync.FindReminderByID(reminderID)
-	if fullID == "" {
-		fullID = w.Sync.FindReminderByTitle(reminderID, "", false)
-	}
-	if fullID == "" {
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
 		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
 	}
-
-	rd := w.Sync.Cache.Reminders[fullID]
 	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
 		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
 	}

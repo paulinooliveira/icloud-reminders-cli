@@ -2,8 +2,8 @@ package writer
 
 import (
 	"crypto/sha512"
-	"encoding/json"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +29,7 @@ func (w *Writer) AssignReminderToSection(reminderHint, listHint, sectionHint str
 	if err != nil {
 		return errResult(err), nil
 	}
+	currentSectionID, _ := w.sectionIDForReminder(ownerID, listID, shortID(reminderID))
 
 	sectionID, sectionName, err := w.resolveSectionRef(ownerID, listID, sectionHint)
 	if err != nil {
@@ -37,6 +38,11 @@ func (w *Writer) AssignReminderToSection(reminderHint, listHint, sectionHint str
 
 	if err := w.applySectionMembership(ownerID, listID, sectionID, []string{shortID(reminderID)}, false); err != nil {
 		return errResult(err), nil
+	}
+	if currentSectionID != "" && currentSectionID != sectionID {
+		if err := w.deleteSectionIfEmpty(ownerID, listID, currentSectionID); err != nil {
+			return errResult(err), nil
+		}
 	}
 
 	return map[string]interface{}{
@@ -61,9 +67,15 @@ func (w *Writer) ClearReminderSection(reminderHint, listHint string) (map[string
 	if err != nil {
 		return errResult(err), nil
 	}
+	currentSectionID, _ := w.sectionIDForReminder(ownerID, listID, shortID(reminderID))
 
 	if err := w.applySectionMembership(ownerID, listID, "", []string{shortID(reminderID)}, true); err != nil {
 		return errResult(err), nil
+	}
+	if currentSectionID != "" {
+		if err := w.deleteSectionIfEmpty(ownerID, listID, currentSectionID); err != nil {
+			return errResult(err), nil
+		}
 	}
 
 	return map[string]interface{}{
@@ -250,11 +262,11 @@ func (w *Writer) DeleteSection(listHint, sectionHint string, force bool) (map[st
 		// non-fatal
 	}
 	return map[string]interface{}{
-		"section_id":     recordName,
-		"list_id":        listID,
-		"name":           sectionName,
-		"cleared_count":  len(memberIDs),
-		"records":        result["records"],
+		"section_id":    recordName,
+		"list_id":       listID,
+		"name":          sectionName,
+		"cleared_count": len(memberIDs),
+		"records":       result["records"],
 	}, nil
 }
 
@@ -266,17 +278,16 @@ func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, remin
 
 	fields, _ := listRecord["fields"].(map[string]interface{})
 	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
-	if assetURL == "" {
-		return fmt.Errorf("list %s has no section metadata asset", listID)
-	}
-
-	rawAsset, err := w.CK.DownloadAsset(assetURL)
-	if err != nil {
-		return fmt.Errorf("download memberships asset: %w", err)
-	}
-	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
-	if err != nil {
-		return fmt.Errorf("decode memberships asset: %w", err)
+	membershipFile := &sections.MembershipFile{}
+	if assetURL != "" {
+		rawAsset, err := w.CK.DownloadAsset(assetURL)
+		if err != nil {
+			return fmt.Errorf("download memberships asset: %w", err)
+		}
+		membershipFile, err = sections.DecodeMembershipFile(rawAsset)
+		if err != nil {
+			return fmt.Errorf("decode memberships asset: %w", err)
+		}
 	}
 
 	if clearOnly {
@@ -343,6 +354,66 @@ func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, remin
 	}
 	if recErr := checkRecordErrors(result); recErr != nil {
 		return recErr
+	}
+	return nil
+}
+
+func (w *Writer) sectionIDForReminder(ownerID, listID, reminderID string) (string, error) {
+	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	if err != nil {
+		return "", err
+	}
+	fields, _ := listRecord["fields"].(map[string]interface{})
+	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
+	if assetURL == "" {
+		return "", nil
+	}
+	rawAsset, err := w.CK.DownloadAsset(assetURL)
+	if err != nil {
+		return "", fmt.Errorf("download memberships asset: %w", err)
+	}
+	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
+	if err != nil {
+		return "", fmt.Errorf("decode memberships asset: %w", err)
+	}
+	return sections.GroupIDForMember(membershipFile, reminderID), nil
+}
+
+func (w *Writer) deleteSectionIfEmpty(ownerID, listID, sectionID string) error {
+	if sectionID == "" {
+		return nil
+	}
+	memberIDs, err := w.memberIDsForSection(ownerID, listID, sectionID)
+	if err != nil {
+		return err
+	}
+	if len(memberIDs) > 0 {
+		return nil
+	}
+	recordName, record, err := w.lookupSectionRecord(ownerID, listID, sectionID)
+	if err != nil {
+		return nil
+	}
+	changeTag, _ := record["recordChangeTag"].(string)
+	if changeTag == "" {
+		return nil
+	}
+	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
+		"operationType": "delete",
+		"record": map[string]interface{}{
+			"recordName":      recordName,
+			"recordChangeTag": changeTag,
+		},
+	}})
+	if err != nil {
+		return err
+	}
+	if recErr := checkRecordErrors(result); recErr != nil {
+		return recErr
+	}
+	delete(w.Sync.Cache.Sections, recordName)
+	if err := w.Sync.Cache.Save(); err != nil {
+		// non-fatal
 	}
 	return nil
 }
@@ -474,7 +545,7 @@ func (w *Writer) resolveReminderRef(reminderHint string) (string, error) {
 	if strings.HasPrefix(reminderHint, "Reminder/") {
 		return reminderHint, nil
 	}
-	if rid := w.Sync.FindReminderByID(reminderHint); rid != "" {
+	if rid, _, err := w.resolveReminderRecord(reminderHint); err == nil && rid != "" {
 		return rid, nil
 	}
 	return "", fmt.Errorf("reminder %q not found", reminderHint)
@@ -664,6 +735,32 @@ func getFieldStringValue(fields map[string]interface{}, key string) string {
 	field, _ := fields[key].(map[string]interface{})
 	val, _ := field["value"].(string)
 	return val
+}
+
+func getFieldIntValue(fields map[string]interface{}, key string) int {
+	field, _ := fields[key].(map[string]interface{})
+	switch v := field["value"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+
+func getFieldInt64Value(fields map[string]interface{}, key string) int64 {
+	field, _ := fields[key].(map[string]interface{})
+	switch v := field["value"].(type) {
+	case float64:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	}
+	return 0
 }
 
 func getReferenceRecordName(fields map[string]interface{}, key string) string {

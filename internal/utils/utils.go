@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -235,23 +237,128 @@ func extractLengthDelimitedField(buf []byte, targetField int) ([][]byte, error) 
 	return out, nil
 }
 
-// TsToStr converts a millisecond timestamp to YYYY-MM-DD string.
-// Returns empty string if tsMs is 0.
+// TsToStr converts a millisecond timestamp to a local due string.
+// It returns YYYY-MM-DD for date-only values and YYYY-MM-DDTHH:MM-07:00
+// when a real time component is present. Returns empty string if tsMs is 0.
 func TsToStr(tsMs int64) string {
 	if tsMs == 0 {
 		return ""
 	}
-	t := time.UnixMilli(tsMs).UTC()
-	return t.Format("2006-01-02")
+	t := time.UnixMilli(tsMs).In(time.Local)
+	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+		return t.Format("2006-01-02")
+	}
+	return t.Format("2006-01-02T15:04Z07:00")
 }
 
-// StrToTs converts a YYYY-MM-DD string to milliseconds timestamp.
+// DueSpec is the parsed shape of a due string.
+type DueSpec struct {
+	Time      time.Time
+	Timestamp int64
+	HasTime   bool
+	TimeZone  string
+}
+
+// ParseDue parses a due string and preserves whether a real time component was
+// explicitly provided.
+func ParseDue(dateStr string) (DueSpec, error) {
+	dateStr = strings.TrimSpace(dateStr)
+	layouts := []struct {
+		layout  string
+		local   bool
+		hasTime bool
+	}{
+		{"2006-01-02", true, false},
+		{"2006-01-02T15:04", true, true},
+		{"2006-01-02 15:04", true, true},
+		{time.RFC3339, false, true},
+		{"2006-01-02T15:04Z07:00", false, true},
+	}
+	var lastErr error
+	for _, item := range layouts {
+		var (
+			t   time.Time
+			err error
+		)
+		if item.local {
+			t, err = time.ParseInLocation(item.layout, dateStr, time.Local)
+		} else {
+			t, err = time.Parse(item.layout, dateStr)
+		}
+		if err == nil {
+			return DueSpec{
+				Time:      t,
+				Timestamp: t.UTC().UnixMilli(),
+				HasTime:   item.hasTime,
+				TimeZone:  dueTimeZoneID(t),
+			}, nil
+		}
+		lastErr = err
+	}
+	return DueSpec{}, lastErr
+}
+
+// EncodeDateComponents encodes an Apple-style date-components payload for a
+// timed reminder alarm trigger.
+func EncodeDateComponents(spec DueSpec) (string, error) {
+	if !spec.HasTime {
+		return "", nil
+	}
+	payload := map[string]interface{}{
+		"timeZone": map[string]string{
+			"identifier": spec.TimeZone,
+		},
+		"era":    1,
+		"year":   spec.Time.Year(),
+		"month":  int(spec.Time.Month()),
+		"day":    spec.Time.Day(),
+		"hour":   spec.Time.Hour(),
+		"minute": spec.Time.Minute(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func dueTimeZoneID(t time.Time) string {
+	if loc := t.Location(); loc != nil {
+		if name := loc.String(); name != "" && name != "Local" {
+			return name
+		}
+	}
+	if tz := os.Getenv("TZ"); tz != "" {
+		return tz
+	}
+	if loc := time.Now().Location(); loc != nil {
+		if name := loc.String(); name != "" && name != "Local" {
+			return name
+		}
+	}
+	if raw, err := os.ReadFile("/etc/timezone"); err == nil {
+		if name := strings.TrimSpace(string(raw)); name != "" {
+			return name
+		}
+	}
+	if name, _ := t.Zone(); name != "" {
+		return name
+	}
+	return "UTC"
+}
+
+// StrToTs converts a due string to milliseconds timestamp.
+// Supported inputs:
+// - YYYY-MM-DD
+// - YYYY-MM-DDTHH:MM
+// - YYYY-MM-DD HH:MM
+// - RFC3339 / RFC3339 without seconds
 func StrToTs(dateStr string) (int64, error) {
-	t, err := time.Parse("2006-01-02", dateStr)
+	spec, err := ParseDue(dateStr)
 	if err != nil {
 		return 0, err
 	}
-	return t.UTC().UnixMilli(), nil
+	return spec.Timestamp, nil
 }
 
 // generateUUID generates a random 16-byte UUID (v4).

@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/sections"
 	"icloud-reminders/internal/utils"
 )
@@ -54,26 +55,21 @@ var sectionsCmd = &cobra.Command{
 			return err
 		}
 
-		reminderRecordNames := make([]string, 0, len(membershipFile.Memberships)*2)
 		seenReminders := make(map[string]struct{})
-		seenReminderRecords := make(map[string]struct{})
+		memberIDs := make([]string, 0, len(membershipFile.Memberships))
 		for _, membership := range membershipFile.Memberships {
-			if _, ok := seenReminders[membership.MemberID]; !ok {
-				seenReminders[membership.MemberID] = struct{}{}
-				for _, candidate := range []string{membership.MemberID, sections.ReminderRecordName(membership.MemberID)} {
-					if _, exists := seenReminderRecords[candidate]; exists {
-						continue
-					}
-					seenReminderRecords[candidate] = struct{}{}
-					reminderRecordNames = append(reminderRecordNames, candidate)
-				}
+			if _, ok := seenReminders[membership.MemberID]; ok {
+				continue
 			}
+			seenReminders[membership.MemberID] = struct{}{}
+			memberIDs = append(memberIDs, membership.MemberID)
 		}
 
-		reminderRecords, err := ckClient.LookupRecords(ownerID, reminderRecordNames)
+		reminderTitles, err := lookupReminderTitles(ownerID, memberIDs)
 		if err != nil {
 			return fmt.Errorf("lookup section reminders: %w", err)
 		}
+		visibleAppReminderIDs := liveVisibleReminderIDs(listName)
 
 		sectionNames := make(map[string]string, len(sectionRecords))
 		for _, record := range sectionRecords {
@@ -94,47 +90,54 @@ var sectionsCmd = &cobra.Command{
 			sectionNames[sectionID] = name
 		}
 
-		reminderTitles := make(map[string]string, len(reminderRecords))
-		for _, record := range reminderRecords {
-			recordName, _ := record["recordName"].(string)
-			short := shortID(recordName)
-			if code, _ := record["serverErrorCode"].(string); code != "" {
-				if _, exists := reminderTitles[short]; !exists {
-					reminderTitles[short] = "(missing reminder)"
-				}
-				continue
-			}
-			fields, _ := record["fields"].(map[string]interface{})
-			title := utils.ExtractTitle(getRecordString(fields, "TitleDocument"))
-			if title == "" {
-				title = short
-			}
-			reminderTitles[short] = title
-		}
-
 		ordered := sections.OrderedSections(sectionNames, membershipFile.Memberships)
-		if len(ordered) == 0 {
+		visibleSections := 0
+		for _, section := range ordered {
+			if sectionVisibleCount(section, reminderTitles, visibleAppReminderIDs) > 0 {
+				visibleSections++
+			}
+		}
+		if visibleSections == 0 {
 			fmt.Printf("\n📚 %s\n", listName)
 			fmt.Println("  No sections on this list.")
-			return nil
-		}
-		fmt.Printf("\n📚 %s (%d sections)\n", listName, len(ordered))
-		for _, section := range ordered {
-			title := section.Name
-			if title == "" {
-				title = section.ID
-			}
-			fmt.Printf("\n§ %s (%d)\n", title, len(section.Members))
-			for _, memberID := range section.Members {
-				fmt.Printf("  • %s  (%s)\n", reminderTitles[memberID], memberID)
+		} else {
+			fmt.Printf("\n📚 %s (%d sections)\n", listName, visibleSections)
+			for _, section := range ordered {
+				visibleMembers := visibleSectionMembers(section, reminderTitles, visibleAppReminderIDs)
+				if len(visibleMembers) == 0 {
+					continue
+				}
+				title := section.Name
+				if title == "" {
+					title = section.ID
+				}
+				fmt.Printf("\n§ %s (%d)\n", title, len(visibleMembers))
+				for _, memberID := range visibleMembers {
+					fmt.Printf("  • %s  (%s)\n", reminderTitles[memberID], memberID)
+				}
 			}
 		}
 
 		unsectioned := findUnsectionedReminderIDs(fields, seenReminders)
 		if len(unsectioned) > 0 {
-			fmt.Printf("\n§ No section (%d)\n", len(unsectioned))
+			unsectionedTitles, err := lookupReminderTitles(ownerID, unsectioned)
+			if err != nil {
+				return fmt.Errorf("lookup unsectioned reminders: %w", err)
+			}
+			visible := make([]string, 0, len(unsectioned))
 			for _, reminderID := range unsectioned {
+				if isVisibleReminder(reminderID, reminderTitles[reminderID], visibleAppReminderIDs) || isVisibleReminder(reminderID, unsectionedTitles[reminderID], visibleAppReminderIDs) {
+					visible = append(visible, reminderID)
+				}
+			}
+			if len(visible) > 0 {
+				fmt.Printf("\n§ No section (%d)\n", len(visible))
+			}
+			for _, reminderID := range visible {
 				title := reminderTitles[reminderID]
+				if title == "" {
+					title = unsectionedTitles[reminderID]
+				}
 				if title == "" {
 					title = reminderID
 				}
@@ -143,6 +146,89 @@ var sectionsCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func lookupReminderTitles(ownerID string, reminderIDs []string) (map[string]string, error) {
+	reminderRecordNames := make([]string, 0, len(reminderIDs)*2)
+	seenReminderRecords := make(map[string]struct{})
+	for _, reminderID := range reminderIDs {
+		for _, candidate := range []string{reminderID, sections.ReminderRecordName(reminderID)} {
+			if _, exists := seenReminderRecords[candidate]; exists {
+				continue
+			}
+			seenReminderRecords[candidate] = struct{}{}
+			reminderRecordNames = append(reminderRecordNames, candidate)
+		}
+	}
+	if len(reminderRecordNames) == 0 {
+		return map[string]string{}, nil
+	}
+
+	records, err := ckClient.LookupRecords(ownerID, reminderRecordNames)
+	if err != nil {
+		return nil, err
+	}
+	reminderTitles := make(map[string]string, len(records))
+	for _, record := range records {
+		recordName, _ := record["recordName"].(string)
+		short := shortID(recordName)
+		if code, _ := record["serverErrorCode"].(string); code != "" {
+			if _, exists := reminderTitles[short]; !exists {
+				reminderTitles[short] = "(missing reminder)"
+			}
+			continue
+		}
+		fields, _ := record["fields"].(map[string]interface{})
+		title := utils.ExtractTitle(getRecordString(fields, "TitleDocument"))
+		if title == "" {
+			title = short
+		}
+		reminderTitles[short] = title
+	}
+	return reminderTitles, nil
+}
+
+func visibleSectionMembers(section sections.Section, reminderTitles map[string]string, visibleAppReminderIDs map[string]struct{}) []string {
+	out := make([]string, 0, len(section.Members))
+	for _, memberID := range section.Members {
+		if isVisibleReminder(memberID, reminderTitles[memberID], visibleAppReminderIDs) {
+			out = append(out, memberID)
+		}
+	}
+	return out
+}
+
+func sectionVisibleCount(section sections.Section, reminderTitles map[string]string, visibleAppReminderIDs map[string]struct{}) int {
+	return len(visibleSectionMembers(section, reminderTitles, visibleAppReminderIDs))
+}
+
+func isVisibleReminder(reminderID, title string, visibleAppReminderIDs map[string]struct{}) bool {
+	title = strings.TrimSpace(title)
+	if title == "" || title == "(missing reminder)" {
+		return false
+	}
+	if len(visibleAppReminderIDs) == 0 {
+		return true
+	}
+	_, ok := visibleAppReminderIDs[strings.ToUpper(shortID(reminderID))]
+	return ok
+}
+
+func liveVisibleReminderIDs(listName string) map[string]struct{} {
+	cfg, err := applebridge.LoadConfig()
+	if err != nil {
+		return nil
+	}
+	bridge := applebridge.New(cfg)
+	items, err := bridge.ListReminders(listName)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		out[strings.ToUpper(item.UUID())] = struct{}{}
+	}
+	return out
 }
 
 func resolveListRecordName(ownerID, hint string) (string, error) {

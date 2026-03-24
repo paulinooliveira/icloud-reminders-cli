@@ -12,15 +12,32 @@ var reopenCmd = &cobra.Command{
 	Short:   "Mark a reminder as to-do again",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := syncEngine.Sync(false); err != nil {
+		reminderID := args[0]
+		payload := struct {
+			ReminderID string `json:"reminder_id"`
+		}{ReminderID: reminderID}
+		if err := executeMutation("reopen", "reminder", reminderID, payload, true, func() (mutationOutcome, error) {
+			if err := syncEngine.Sync(false); err != nil {
+				return mutationOutcome{}, err
+			}
+			result, err := w.ReopenReminder(reminderID)
+			if err != nil {
+				return mutationOutcome{}, err
+			}
+			if errMsg, ok := result["error"].(string); ok {
+				return mutationOutcome{}, fmt.Errorf("%s", errMsg)
+			}
+			return mutationOutcome{
+				Backend: result,
+				CloudID: reminderID,
+				Projection: map[string]interface{}{
+					"id":        reminderID,
+					"completed": false,
+					"deleted":   false,
+				},
+			}, nil
+		}); err != nil {
 			return err
-		}
-		result, err := w.ReopenReminder(args[0])
-		if err != nil {
-			return err
-		}
-		if errMsg, ok := result["error"].(string); ok {
-			return fmt.Errorf("%s", errMsg)
 		}
 		fmt.Printf("✅ Reopened: %s\n", args[0])
 		return nil

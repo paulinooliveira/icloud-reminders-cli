@@ -23,7 +23,7 @@ var setSectionCmd = &cobra.Command{
 		if !setSectionClear && setSectionName == "" {
 			return fmt.Errorf("--section or --clear is required")
 		}
-		if err := syncEngine.Sync(false); err != nil {
+		if err := bestEffortSync(); err != nil && !shouldProceedWithoutSync(args[0]) {
 			return err
 		}
 

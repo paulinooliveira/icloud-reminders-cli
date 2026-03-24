@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,7 @@ var SessionFile = filepath.Join(ConfigDir, "session.json")
 type ReminderData struct {
 	Title          string   `json:"title"`
 	Completed      bool     `json:"completed"`
+	Flagged        bool     `json:"flagged,omitempty"`
 	CompletionDate *string  `json:"completion_date,omitempty"`
 	Due            *string  `json:"due,omitempty"`
 	Priority       int      `json:"priority"`
@@ -105,4 +107,30 @@ func (c *Cache) Save() error {
 		return err
 	}
 	return os.WriteFile(CacheFile, data, 0600)
+}
+
+// ReminderAliases returns the reminder cache keys that may refer to the same
+// CloudKit reminder record.
+func ReminderAliases(id string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 2)
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+
+	short := id
+	if idx := strings.LastIndexByte(id, '/'); idx >= 0 {
+		short = id[idx+1:]
+	}
+	add(id)
+	add(short)
+	add("Reminder/" + short)
+	return out
 }

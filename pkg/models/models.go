@@ -6,12 +6,16 @@ type Reminder struct {
 	ID             string   `json:"id"`
 	Title          string   `json:"title"`
 	Completed      bool     `json:"completed"`
+	Flagged        bool     `json:"flagged,omitempty"`
 	CompletionDate *string  `json:"completion_date,omitempty"`
 	Due            *string  `json:"due,omitempty"`
 	Priority       int      `json:"priority"` // 0=none, 1=high, 5=medium, 9=low
 	Notes          *string  `json:"notes,omitempty"`
 	TagIDs         []string `json:"tag_ids,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
+	SectionID      *string  `json:"section_id,omitempty"`
+	Section        *string  `json:"section,omitempty"`
+	URL            *string  `json:"url,omitempty"`
 	ListRef        *string  `json:"list_ref,omitempty"`
 	ListName       string   `json:"list_name"`
 	ParentRef      *string  `json:"parent_ref,omitempty"`

@@ -149,11 +149,13 @@ reminders add-batch "Butter" "Käse" "Milch" -l "Einkauf"
 # Add multiple as subtasks
 reminders add-batch "Butter" "Käse" -l "Einkauf" --parent ABC123DE
 
-# Edit a reminder (update title, due date, notes, or priority)
+# Edit a reminder (update title, due date, notes, priority, parent, or flagged state)
 reminders edit abc123 --title "New title"
-reminders edit abc123 --due 2026-03-01 --priority high
+reminders edit abc123 --due 2026-03-01T16:30 --priority high
 reminders edit abc123 --notes "Updated notes"
 reminders edit abc123 --priority none
+reminders edit abc123 --flagged
+reminders edit abc123 --unflagged
 
 # Set or clear native Apple Reminders tags
 reminders set-tags abc123 --tag p-manager

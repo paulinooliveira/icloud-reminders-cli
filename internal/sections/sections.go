@@ -176,6 +176,32 @@ func RemoveMemberships(mf *MembershipFile, reminderIDs []string) {
 	mf.Memberships = filtered
 }
 
+// GroupIDForMember returns the section/group id for a reminder if present.
+func GroupIDForMember(mf *MembershipFile, reminderID string) string {
+	if mf == nil {
+		return ""
+	}
+	for _, membership := range mf.Memberships {
+		if membership.MemberID == reminderID {
+			return membership.GroupID
+		}
+	}
+	return ""
+}
+
+// HasMembers reports whether a section still has at least one membership.
+func HasMembers(mf *MembershipFile, sectionID string) bool {
+	if mf == nil {
+		return false
+	}
+	for _, membership := range mf.Memberships {
+		if membership.GroupID == sectionID {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveSection removes all memberships for a given section ID and returns the
 // removed member IDs.
 func RemoveSection(mf *MembershipFile, sectionID string) []string {
