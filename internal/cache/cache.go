@@ -19,16 +19,17 @@ var SessionFile = filepath.Join(ConfigDir, "session.json")
 
 // ReminderData holds raw cached data for a single reminder.
 type ReminderData struct {
-	Title          string  `json:"title"`
-	Completed      bool    `json:"completed"`
-	CompletionDate *string `json:"completion_date,omitempty"`
-	Due            *string `json:"due,omitempty"`
-	Priority       int     `json:"priority"`
-	Notes          *string `json:"notes,omitempty"`
-	ListRef        *string `json:"list_ref,omitempty"`
-	ParentRef      *string `json:"parent_ref,omitempty"`
-	ModifiedTS     *int64  `json:"modified_ts,omitempty"`
-	ChangeTag      *string `json:"change_tag,omitempty"`
+	Title          string   `json:"title"`
+	Completed      bool     `json:"completed"`
+	CompletionDate *string  `json:"completion_date,omitempty"`
+	Due            *string  `json:"due,omitempty"`
+	Priority       int      `json:"priority"`
+	Notes          *string  `json:"notes,omitempty"`
+	HashtagIDs     []string `json:"hashtag_ids,omitempty"`
+	ListRef        *string  `json:"list_ref,omitempty"`
+	ParentRef      *string  `json:"parent_ref,omitempty"`
+	ModifiedTS     *int64   `json:"modified_ts,omitempty"`
+	ChangeTag      *string  `json:"change_tag,omitempty"`
 }
 
 // SectionData holds cached metadata for a list section.
@@ -39,10 +40,18 @@ type SectionData struct {
 	ChangeTag     *string `json:"change_tag,omitempty"`
 }
 
+// HashtagData holds cached metadata for a reminder hashtag record.
+type HashtagData struct {
+	Name        string  `json:"name"`
+	ReminderRef *string `json:"reminder_ref,omitempty"`
+	ChangeTag   *string `json:"change_tag,omitempty"`
+}
+
 // Cache holds the local cache of reminders and lists.
 type Cache struct {
 	Reminders map[string]*ReminderData `json:"reminders"`
 	Sections  map[string]*SectionData  `json:"sections"`
+	Hashtags  map[string]*HashtagData  `json:"hashtags"`
 	Lists     map[string]string        `json:"lists"`
 	SyncToken *string                  `json:"sync_token,omitempty"`
 	OwnerID   *string                  `json:"owner_id,omitempty"`
@@ -54,6 +63,7 @@ func NewCache() *Cache {
 	return &Cache{
 		Reminders: make(map[string]*ReminderData),
 		Sections:  make(map[string]*SectionData),
+		Hashtags:  make(map[string]*HashtagData),
 		Lists:     make(map[string]string),
 	}
 }
@@ -73,6 +83,9 @@ func Load() *Cache {
 	}
 	if c.Sections == nil {
 		c.Sections = make(map[string]*SectionData)
+	}
+	if c.Hashtags == nil {
+		c.Hashtags = make(map[string]*HashtagData)
 	}
 	if c.Lists == nil {
 		c.Lists = make(map[string]string)

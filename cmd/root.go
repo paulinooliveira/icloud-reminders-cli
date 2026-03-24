@@ -67,11 +67,13 @@ func init() {
 	RootCmd.AddCommand(
 		authCmd,
 		listCmd,
+		inspectCmd,
 		sectionsCmd,
 		ensureSectionCmd,
 		renameSectionCmd,
 		deleteSectionCmd,
 		setSectionCmd,
+		setTagsCmd,
 		searchCmd,
 		listsCmd,
 		createListCmd,

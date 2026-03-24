@@ -167,7 +167,11 @@ func runListByParent(reminders []*models.Reminder, parentFilter string) error {
 		if r.PriorityLabel() != "" {
 			prio = fmt.Sprintf("  [%s]", r.PriorityLabel())
 		}
-		fmt.Printf("  %s %s%s%s  (%s)\n", status, r.Title, due, prio, r.ShortID())
+		tags := ""
+		if len(r.Tags) > 0 {
+			tags = fmt.Sprintf("  [tags %s]", formatTags(r.Tags))
+		}
+		fmt.Printf("  %s %s%s%s%s  (%s)\n", status, r.Title, due, prio, tags, r.ShortID())
 	}
 	return nil
 }
@@ -186,7 +190,11 @@ func printReminder(r *models.Reminder, indent int, childrenByParent map[string][
 	if r.PriorityLabel() != "" {
 		prio = fmt.Sprintf("  [%s]", r.PriorityLabel())
 	}
-	fmt.Printf("%s%s %s%s%s  (%s)\n", prefix, status, r.Title, due, prio, r.ShortID())
+	tags := ""
+	if len(r.Tags) > 0 {
+		tags = fmt.Sprintf("  [tags %s]", formatTags(r.Tags))
+	}
+	fmt.Printf("%s%s %s%s%s%s  (%s)\n", prefix, status, r.Title, due, prio, tags, r.ShortID())
 
 	// Print children recursively
 	children := childrenByParent[r.ID]
@@ -223,6 +231,21 @@ func toLowerStr(s string) string {
 		result[i] = c
 	}
 	return string(result)
+}
+
+func formatTags(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	out := make([]byte, 0, len(tags)*12)
+	for i, tag := range tags {
+		if i > 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, '#')
+		out = append(out, tag...)
+	}
+	return string(out)
 }
 
 func init() {

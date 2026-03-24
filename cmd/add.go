@@ -13,6 +13,7 @@ var (
 	addNotes    string
 	addParent   string
 	addSection  string
+	addTags     []string
 )
 
 var addCmd = &cobra.Command{
@@ -30,6 +31,16 @@ var addCmd = &cobra.Command{
 		}
 		if errMsg, ok := result["error"].(string); ok {
 			return fmt.Errorf("%s", errMsg)
+		}
+		if len(addTags) > 0 {
+			reminderID, _ := result["id"].(string)
+			tagResult, err := w.SetReminderTags(reminderID, addTags)
+			if err != nil {
+				return err
+			}
+			if errMsg, ok := tagResult["error"].(string); ok {
+				return fmt.Errorf("%s", errMsg)
+			}
 		}
 		if addSection != "" {
 			reminderID, _ := result["id"].(string)
@@ -53,7 +64,11 @@ var addCmd = &cobra.Command{
 		if addSection != "" {
 			sectionStr = fmt.Sprintf(" [section %s]", addSection)
 		}
-		fmt.Printf("✅ Added: '%s'%s%s%s\n", title, listStr, parentStr, sectionStr)
+		tagStr := ""
+		if len(addTags) > 0 {
+			tagStr = fmt.Sprintf(" [tags %v]", addTags)
+		}
+		fmt.Printf("✅ Added: '%s'%s%s%s%s\n", title, listStr, parentStr, sectionStr, tagStr)
 		return nil
 	},
 }
@@ -130,6 +145,7 @@ func init() {
 	addCmd.Flags().StringVarP(&addNotes, "notes", "n", "", "Notes")
 	addCmd.Flags().StringVar(&addParent, "parent", "", "Parent reminder title or ID (creates subtask)")
 	addCmd.Flags().StringVar(&addSection, "section", "", "Existing section name or ID")
+	addCmd.Flags().StringSliceVar(&addTags, "tag", nil, "Native tag name(s), without the leading #")
 	_ = addCmd.MarkFlagRequired("list")
 
 	addBatchCmd.Flags().StringVarP(&batchListName, "list", "l", "", "List name (required)")

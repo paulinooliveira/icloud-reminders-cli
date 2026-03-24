@@ -194,6 +194,30 @@ func (e *Engine) processRecords(records []interface{}) {
 				}
 			}
 
+		case "Hashtag":
+			if deleted {
+				delete(e.Cache.Hashtags, rname)
+			} else {
+				name := getFieldString(fields, "Name")
+				reminderRef := getFieldRefName(fields, "Reminder")
+				changeTag, _ := r["recordChangeTag"].(string)
+
+				hd := &cache.HashtagData{
+					Name: name,
+				}
+				if reminderRef != "" {
+					hd.ReminderRef = &reminderRef
+				}
+				if changeTag != "" {
+					hd.ChangeTag = &changeTag
+				}
+				if name == "" && reminderRef == "" && changeTag == "" {
+					delete(e.Cache.Hashtags, rname)
+				} else {
+					e.Cache.Hashtags[rname] = hd
+				}
+			}
+
 		case "Reminder":
 			if deleted {
 				delete(e.Cache.Reminders, rname)
@@ -215,6 +239,7 @@ func (e *Engine) processRecords(records []interface{}) {
 
 				listRef := getFieldRefName(fields, "List")
 				parentRef := getFieldRefName(fields, "ParentReminder")
+				hashtagIDs := getFieldStringList(fields, "HashtagIDs")
 				notes := utils.ExtractTitle(getFieldString(fields, "NotesDocument"))
 				priority := getFieldInt(fields, "Priority")
 				changeTag, _ := r["recordChangeTag"].(string)
@@ -236,6 +261,9 @@ func (e *Engine) processRecords(records []interface{}) {
 				}
 				if notes != "" {
 					rd.Notes = &notes
+				}
+				if len(hashtagIDs) > 0 {
+					rd.HashtagIDs = append([]string(nil), hashtagIDs...)
 				}
 				if listRef != "" {
 					rd.ListRef = &listRef
@@ -267,9 +295,28 @@ func (e *Engine) GetReminders(includeCompleted bool) []*models.Reminder {
 			Due:            data.Due,
 			Priority:       data.Priority,
 			Notes:          data.Notes,
+			TagIDs:         append([]string(nil), data.HashtagIDs...),
 			ListRef:        data.ListRef,
 			ParentRef:      data.ParentRef,
 			ModifiedTS:     data.ModifiedTS,
+		}
+		if len(data.HashtagIDs) > 0 {
+			seen := make(map[string]struct{}, len(data.HashtagIDs))
+			for _, tagID := range data.HashtagIDs {
+				recordName := tagID
+				if !strings.HasPrefix(recordName, "Hashtag/") {
+					recordName = "Hashtag/" + recordName
+				}
+				hd := e.Cache.Hashtags[recordName]
+				if hd == nil || hd.Name == "" {
+					continue
+				}
+				if _, ok := seen[hd.Name]; ok {
+					continue
+				}
+				seen[hd.Name] = struct{}{}
+				r.Tags = append(r.Tags, hd.Name)
+			}
 		}
 		if data.ListRef != nil {
 			if name, ok := e.Cache.Lists[*data.ListRef]; ok {
@@ -410,6 +457,25 @@ func getFieldRefName(fields map[string]interface{}, key string) string {
 	v, _ := f["value"].(map[string]interface{})
 	name, _ := v["recordName"].(string)
 	return name
+}
+
+func getFieldStringList(fields map[string]interface{}, key string) []string {
+	f, _ := fields[key].(map[string]interface{})
+	raw := f["value"]
+	items, _ := raw.([]interface{})
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func toLower(s string) string {

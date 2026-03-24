@@ -23,11 +23,12 @@ type Writer struct {
 // ReminderChanges carries explicit field updates for a reminder.
 // Nil means unchanged; a non-nil empty string means clear where supported.
 type ReminderChanges struct {
-	Title     *string
-	DueDate   *string
-	Notes     *string
-	Priority  *int
-	Completed *bool
+	Title      *string
+	DueDate    *string
+	Notes      *string
+	Priority   *int
+	Completed  *bool
+	HashtagIDs *[]string
 }
 
 // New creates a new Writer.
@@ -391,8 +392,8 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
 	}
 
-	if changes.Title == nil && changes.DueDate == nil && changes.Notes == nil && changes.Priority == nil && changes.Completed == nil {
-		return errResult(fmt.Errorf("no changes specified — use --title, --due, --notes, or --priority")), nil
+	if changes.Title == nil && changes.DueDate == nil && changes.Notes == nil && changes.Priority == nil && changes.Completed == nil && changes.HashtagIDs == nil {
+		return errResult(fmt.Errorf("no changes specified — use --title, --due, --notes, --priority, or tag changes")), nil
 	}
 
 	fields, err := buildReminderFields(rd, changes)
@@ -574,6 +575,26 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges) (
 		fields["ParentReminder"] = recordRef(*current.ParentRef)
 	}
 
+	hashtagIDs := append([]string(nil), current.HashtagIDs...)
+	if changes.HashtagIDs != nil {
+		hashtagIDs = append([]string(nil), (*changes.HashtagIDs)...)
+	}
+	if len(hashtagIDs) == 0 {
+		fields["HashtagIDs"] = map[string]interface{}{
+			"value": []interface{}{},
+			"type":  "EMPTY_LIST",
+		}
+	} else {
+		items := make([]interface{}, 0, len(hashtagIDs))
+		for _, id := range hashtagIDs {
+			items = append(items, strings.TrimPrefix(id, "Hashtag/"))
+		}
+		fields["HashtagIDs"] = map[string]interface{}{
+			"value": items,
+			"type":  "STRING_LIST",
+		}
+	}
+
 	due := current.Due
 	if changes.DueDate != nil {
 		if *changes.DueDate == "" {
@@ -641,6 +662,9 @@ func applyReminderChanges(current *cache.ReminderData, changes ReminderChanges) 
 	}
 	if changes.Priority != nil {
 		current.Priority = *changes.Priority
+	}
+	if changes.HashtagIDs != nil {
+		current.HashtagIDs = append([]string(nil), (*changes.HashtagIDs)...)
 	}
 	if changes.Completed != nil {
 		current.Completed = *changes.Completed

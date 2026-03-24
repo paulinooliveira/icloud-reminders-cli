@@ -217,7 +217,7 @@ type AssetUploadTokenRequest struct {
 func (c *Client) ChangesZone(ownerID string, syncToken string) (map[string]interface{}, error) {
 	spec := ZoneChangesSpec{
 		ZoneID:      ZoneID{ZoneName: Zone, OwnerRecordName: ownerID},
-		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder", "DisplayName", "CanonicalName", "MembershipsOfRemindersInSectionsAsData", "MembershipsOfRemindersInSectionsChecksum", "ReminderIDs"},
+		DesiredKeys: []string{"TitleDocument", "NotesDocument", "Name", "Completed", "CompletionDate", "DueDate", "List", "Deleted", "Priority", "ParentReminder", "DisplayName", "CanonicalName", "MembershipsOfRemindersInSectionsAsData", "MembershipsOfRemindersInSectionsChecksum", "ReminderIDs", "HashtagIDs"},
 	}
 	if syncToken != "" {
 		spec.SyncToken = syncToken

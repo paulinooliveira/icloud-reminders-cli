@@ -1,6 +1,9 @@
 package writer
 
 import (
+	"crypto/sha512"
+	"encoding/json"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -323,6 +326,15 @@ func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, remin
 				"MembershipsOfRemindersInSectionsAsData": map[string]interface{}{
 					"value": assetValue,
 				},
+				"MembershipsOfRemindersInSectionsChecksum": map[string]interface{}{
+					"value":       checksumHex(encoded),
+					"type":        "STRING",
+					"isEncrypted": true,
+				},
+				"ResolutionTokenMap": map[string]interface{}{
+					"value": bumpListResolutionTokenMap(fields, "membershipsOfRemindersInSectionsChecksum"),
+					"type":  "STRING",
+				},
 			},
 		},
 	}})
@@ -396,6 +408,15 @@ func (w *Writer) clearOrphanSectionMemberships(ownerID, listID, sectionID string
 			"fields": map[string]interface{}{
 				"MembershipsOfRemindersInSectionsAsData": map[string]interface{}{
 					"value": assetValue,
+				},
+				"MembershipsOfRemindersInSectionsChecksum": map[string]interface{}{
+					"value":       checksumHex(encoded),
+					"type":        "STRING",
+					"isEncrypted": true,
+				},
+				"ResolutionTokenMap": map[string]interface{}{
+					"value": bumpListResolutionTokenMap(fields, "membershipsOfRemindersInSectionsChecksum"),
+					"type":  "STRING",
 				},
 			},
 		},
@@ -772,4 +793,46 @@ func updatedRecordChangeTag(result map[string]interface{}) *string {
 		return nil
 	}
 	return &changeTag
+}
+
+func checksumHex(raw []byte) string {
+	sum := sha512.Sum512(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func bumpListResolutionTokenMap(fields map[string]interface{}, key string) string {
+	raw := getFieldStringValue(fields, "ResolutionTokenMap")
+	if raw == "" {
+		return raw
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return raw
+	}
+	m, _ := payload["map"].(map[string]interface{})
+	if m == nil {
+		return raw
+	}
+	entry, _ := m[key].(map[string]interface{})
+	if entry == nil {
+		entry = map[string]interface{}{}
+		m[key] = entry
+	}
+	entry["modificationTime"] = appleReferenceSeconds()
+	counter := 0
+	switch v := entry["counter"].(type) {
+	case float64:
+		counter = int(v)
+	case int:
+		counter = v
+	}
+	entry["counter"] = counter + 1
+	if _, ok := entry["replicaID"].(string); !ok || entry["replicaID"] == "" {
+		entry["replicaID"] = "D25A1933-3DDF-4573-8177-B051D76C2E5B"
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
 }

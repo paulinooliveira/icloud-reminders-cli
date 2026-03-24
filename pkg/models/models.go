@@ -3,17 +3,19 @@ package models
 
 // Reminder represents a single iCloud Reminder.
 type Reminder struct {
-	ID             string  `json:"id"`
-	Title          string  `json:"title"`
-	Completed      bool    `json:"completed"`
-	CompletionDate *string `json:"completion_date,omitempty"`
-	Due            *string `json:"due,omitempty"`
-	Priority       int     `json:"priority"` // 0=none, 1=high, 5=medium, 9=low
-	Notes          *string `json:"notes,omitempty"`
-	ListRef        *string `json:"list_ref,omitempty"`
-	ListName       string  `json:"list_name"`
-	ParentRef      *string `json:"parent_ref,omitempty"`
-	ModifiedTS     *int64  `json:"modified_ts,omitempty"`
+	ID             string   `json:"id"`
+	Title          string   `json:"title"`
+	Completed      bool     `json:"completed"`
+	CompletionDate *string  `json:"completion_date,omitempty"`
+	Due            *string  `json:"due,omitempty"`
+	Priority       int      `json:"priority"` // 0=none, 1=high, 5=medium, 9=low
+	Notes          *string  `json:"notes,omitempty"`
+	TagIDs         []string `json:"tag_ids,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	ListRef        *string  `json:"list_ref,omitempty"`
+	ListName       string   `json:"list_name"`
+	ParentRef      *string  `json:"parent_ref,omitempty"`
+	ModifiedTS     *int64   `json:"modified_ts,omitempty"`
 }
 
 // PriorityLabel returns a human-readable priority string.

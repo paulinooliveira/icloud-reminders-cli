@@ -1,6 +1,9 @@
 package writer
 
 import (
+	"crypto/sha512"
+	"encoding/hex"
+	"encoding/json"
 	"testing"
 
 	"icloud-reminders/internal/cache"
@@ -15,6 +18,7 @@ func TestBuildReminderFieldsPreservesExistingState(t *testing.T) {
 	completionDate := "2026-03-11"
 	listRef := "List/abc"
 	parentRef := "Reminder/parent"
+	tagIDs := []string{"CEED02C9-FCBF-4A14-9F51-CA3409B265CE"}
 
 	fields, err := buildReminderFields(&cache.ReminderData{
 		Title:          "Original title",
@@ -23,6 +27,7 @@ func TestBuildReminderFieldsPreservesExistingState(t *testing.T) {
 		Due:            &due,
 		Priority:       models.PriorityMap["medium"],
 		Notes:          &notes,
+		HashtagIDs:     tagIDs,
 		ListRef:        &listRef,
 		ParentRef:      &parentRef,
 	}, ReminderChanges{})
@@ -57,6 +62,14 @@ func TestBuildReminderFieldsPreservesExistingState(t *testing.T) {
 	}
 	if got := fields["ParentReminder"].(map[string]interface{})["value"].(map[string]interface{})["recordName"]; got != parentRef {
 		t.Fatalf("parent ref mismatch: got %#v", got)
+	}
+	hashtagField := fields["HashtagIDs"].(map[string]interface{})
+	if got := hashtagField["type"]; got != "STRING_LIST" {
+		t.Fatalf("hashtag type mismatch: got %#v", got)
+	}
+	values := hashtagField["value"].([]interface{})
+	if len(values) != 1 || values[0] != tagIDs[0] {
+		t.Fatalf("hashtag ids mismatch: got %#v", values)
 	}
 }
 
@@ -107,6 +120,25 @@ func TestBuildReminderFieldsRejectsEmptyTitle(t *testing.T) {
 	_, err := buildReminderFields(&cache.ReminderData{Title: "Original"}, ReminderChanges{Title: &clear})
 	if err == nil {
 		t.Fatal("expected empty title error")
+	}
+}
+
+func TestBuildReminderFieldsCanClearTags(t *testing.T) {
+	fields, err := buildReminderFields(&cache.ReminderData{
+		Title:      "Original title",
+		HashtagIDs: []string{"ABC", "DEF"},
+	}, ReminderChanges{
+		HashtagIDs: &[]string{},
+	})
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+	hashtagField := fields["HashtagIDs"].(map[string]interface{})
+	if got := hashtagField["type"]; got != "EMPTY_LIST" {
+		t.Fatalf("hashtag clear type mismatch: got %#v", got)
+	}
+	if got := len(hashtagField["value"].([]interface{})); got != 0 {
+		t.Fatalf("expected empty hashtag list, got %d", got)
 	}
 }
 
@@ -199,6 +231,52 @@ func TestResolveParentRefAcceptsTitle(t *testing.T) {
 
 	if got := resolveParentRef(engine, "explorer", "List/sebastian"); got != "Reminder/explorer-top" {
 		t.Fatalf("title parent resolution mismatch: got %q", got)
+	}
+}
+
+func TestChecksumHex(t *testing.T) {
+	raw := []byte("hello")
+	sum := sha512.Sum512(raw)
+	want := hex.EncodeToString(sum[:])
+	if got := checksumHex(raw); got != want {
+		t.Fatalf("checksumHex mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestBumpListResolutionTokenMap(t *testing.T) {
+	fields := map[string]interface{}{
+		"ResolutionTokenMap": map[string]interface{}{
+			"value": `{"map":{"membershipsOfRemindersInSectionsChecksum":{"replicaID":"RID","counter":3,"modificationTime":10},"name":{"replicaID":"X","counter":1,"modificationTime":20}}}`,
+		},
+	}
+	out := bumpListResolutionTokenMap(fields, "membershipsOfRemindersInSectionsChecksum")
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	m := payload["map"].(map[string]interface{})
+	entry := m["membershipsOfRemindersInSectionsChecksum"].(map[string]interface{})
+	if got := int(entry["counter"].(float64)); got != 4 {
+		t.Fatalf("counter mismatch: got %d", got)
+	}
+	if got := entry["replicaID"].(string); got != "RID" {
+		t.Fatalf("replicaID mismatch: got %q", got)
+	}
+	if got := entry["modificationTime"].(float64); got <= 10 {
+		t.Fatalf("modificationTime not bumped: got %v", got)
+	}
+}
+
+func TestNormalizeTagNames(t *testing.T) {
+	got := normalizeTagNames([]string{" #p-manager ", "explorer", "#p-manager", "", "Reader"})
+	want := []string{"p-manager", "explorer", "Reader"}
+	if len(got) != len(want) {
+		t.Fatalf("length mismatch: got %#v want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("normalizeTagNames mismatch: got %#v want %#v", got, want)
+		}
 	}
 }
 

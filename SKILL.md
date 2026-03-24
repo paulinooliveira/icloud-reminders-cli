@@ -125,10 +125,14 @@ reminders set-section ABC123 -l "Belo" --clear
 # Show live sections, including empty ones the CLI created
 reminders sections -l "Sebastian"
 
+# Inspect the raw CloudKit record for a reminder
+reminders inspect "Section test B1" -l "Sebastian"
+
 # Add reminder (-l is REQUIRED)
 reminders add "Buy milk" -l "Einkauf"
 reminders add "Buy milk" -l "4400A74B-9D82-4F9D-8CB8-392C72BF856A"   # list id also works
 reminders add "Review calendar gaps" -l "Sebastian" --parent "explorer"
+reminders add "Review calendar gaps" -l "Sebastian" --tag explorer
 
 # Add with due date and priority
 reminders add "Call mom" -l "Einkauf" --due 2026-02-25 --priority high
@@ -150,6 +154,10 @@ reminders edit abc123 --title "New title"
 reminders edit abc123 --due 2026-03-01 --priority high
 reminders edit abc123 --notes "Updated notes"
 reminders edit abc123 --priority none
+
+# Set or clear native Apple Reminders tags
+reminders set-tags abc123 --tag p-manager
+reminders set-tags abc123 --clear
 
 # Complete reminder
 reminders complete abc123
