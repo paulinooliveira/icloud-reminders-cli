@@ -126,12 +126,25 @@ func IsNotFoundError(err error) bool {
 }
 
 func (b *Bridge) UpdateReminder(appleID string, title, body *string, completed *bool) error {
+	script := buildUpdateReminderAppleScript(appleID, title, body, completed)
+	if strings.TrimSpace(script) == "" {
+		return nil
+	}
+	_, err := b.runAppleScript(script)
+	return err
+}
+
+func buildUpdateReminderAppleScript(appleID string, title, body *string, completed *bool) string {
 	var statements []string
 	statements = append(statements, fmt.Sprintf("set r to reminder id %s", appleScriptString(appleID)))
 	if title != nil {
+		// Clearing first avoids local Reminders cache concatenation on CRDT-backed fields.
+		statements = append(statements, `set name of r to ""`)
 		statements = append(statements, fmt.Sprintf("set name of r to %s", appleScriptString(*title)))
 	}
 	if body != nil {
+		// Clearing first avoids local Reminders cache concatenation on CRDT-backed fields.
+		statements = append(statements, `set body of r to ""`)
 		statements = append(statements, fmt.Sprintf("set body of r to %s", appleScriptString(*body)))
 	}
 	if completed != nil {
@@ -142,10 +155,9 @@ func (b *Bridge) UpdateReminder(appleID string, title, body *string, completed *
 		}
 	}
 	if len(statements) == 1 {
-		return nil
+		return ""
 	}
-	_, err := b.runAppleScript("tell application \"Reminders\"\n  " + strings.Join(statements, "\n  ") + "\nend tell\n")
-	return err
+	return "tell application \"Reminders\"\n  " + strings.Join(statements, "\n  ") + "\nend tell\n"
 }
 
 func (b *Bridge) runJXA(script string) (string, error) {

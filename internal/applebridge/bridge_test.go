@@ -81,6 +81,30 @@ func TestGetReminderParsesJSON(t *testing.T) {
 	}
 }
 
+func TestBuildUpdateReminderAppleScriptClearsTextBeforeSetting(t *testing.T) {
+	title := "Morning"
+	body := "0 / 1h, 0 / 10k tk."
+	script := buildUpdateReminderAppleScript("x-apple-reminder://ABC", &title, &body, nil)
+	if !strings.Contains(script, "set name of r to \"\"") {
+		t.Fatalf("expected title clear step, got %q", script)
+	}
+	if !strings.Contains(script, "set name of r to \"Morning\"") {
+		t.Fatalf("expected title set step, got %q", script)
+	}
+	if !strings.Contains(script, "set body of r to \"\"") {
+		t.Fatalf("expected body clear step, got %q", script)
+	}
+	if !strings.Contains(script, "set body of r to \"0 / 1h, 0 / 10k tk.\"") {
+		t.Fatalf("expected body set step, got %q", script)
+	}
+	if strings.Index(script, "set name of r to \"\"") > strings.Index(script, "set name of r to \"Morning\"") {
+		t.Fatalf("expected title clear before set, got %q", script)
+	}
+	if strings.Index(script, "set body of r to \"\"") > strings.Index(script, "set body of r to \"0 / 1h, 0 / 10k tk.\"") {
+		t.Fatalf("expected body clear before set, got %q", script)
+	}
+}
+
 func TestIsNotFoundError(t *testing.T) {
 	t.Parallel()
 

@@ -10,6 +10,22 @@ import (
 	"icloud-reminders/internal/writer"
 )
 
+type queueReminderValidator interface {
+	GetReminder(appleID string) (*applebridge.Reminder, error)
+	UpdateReminder(appleID string, title, body *string, completed *bool) error
+}
+
+func canProceedWithoutQueueSync(stateItem queue.StateItem) bool {
+	if shouldProceedWithoutSync(stateItem.CloudID) {
+		return true
+	}
+	return strings.TrimSpace(stateItem.AppleID) != ""
+}
+
+func shouldQueryQueueValidatorList(stateItem queue.StateItem) bool {
+	return strings.TrimSpace(stateItem.AppleID) == "" && strings.TrimSpace(stateItem.CloudID) == ""
+}
+
 func queueLocation() *time.Location {
 	loc, err := time.LoadLocation("America/Sao_Paulo")
 	if err != nil {
@@ -85,8 +101,10 @@ func finalizeQueueSpec(state *queue.State, spec queue.Spec, now time.Time) (queu
 }
 
 func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priorityLabel, listOverride string) (string, string, error) {
-	if err := syncEngine.Sync(false); err != nil {
-		return "", "", err
+	if !canProceedWithoutQueueSync(stateItem) {
+		if err := syncEngine.Sync(false); err != nil {
+			return "", "", err
+		}
 	}
 	bridge, cfg, err := loadOptionalValidatorBridge()
 	if err != nil {
@@ -112,7 +130,7 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 
 	cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
 	var titleMatches []applebridge.Reminder
-	if bridge != nil {
+	if bridge != nil && shouldQueryQueueValidatorList(stateItem) {
 		appItems, err := bridge.ListReminders(listName)
 		if err == nil {
 			titleMatches = queue.FindExactTitleMatches(appItems, spec.Title)
@@ -211,5 +229,56 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 		}
 	}
 
+	if bridge != nil && appleID != "" {
+		if err := repairQueueReminderValidatorText(bridge, appleID, spec.Title, spec.Notes); err != nil {
+			return "", "", err
+		}
+	}
+
 	return appleID, cloudID, nil
+}
+
+func repairQueueReminderValidatorText(bridge queueReminderValidator, appleID, title string, notes *string) error {
+	if bridge == nil || strings.TrimSpace(appleID) == "" {
+		return nil
+	}
+	live, err := bridge.GetReminder(appleID)
+	if err != nil {
+		return err
+	}
+	if live == nil {
+		return fmt.Errorf("validator returned no reminder for %s", appleID)
+	}
+
+	var titlePtr *string
+	if live.Title != title {
+		titleCopy := title
+		titlePtr = &titleCopy
+	}
+	var notesPtr *string
+	if notes != nil && live.Body != *notes {
+		notesCopy := *notes
+		notesPtr = &notesCopy
+	}
+	if titlePtr == nil && notesPtr == nil {
+		return nil
+	}
+	if err := bridge.UpdateReminder(appleID, titlePtr, notesPtr, nil); err != nil {
+		return err
+	}
+
+	verified, err := bridge.GetReminder(appleID)
+	if err != nil {
+		return err
+	}
+	if verified == nil {
+		return fmt.Errorf("validator returned no reminder after repair for %s", appleID)
+	}
+	if titlePtr != nil && verified.Title != title {
+		return fmt.Errorf("validator repair failed for %s: title mismatch", appleID)
+	}
+	if notesPtr != nil && verified.Body != *notes {
+		return fmt.Errorf("validator repair failed for %s: notes mismatch", appleID)
+	}
+	return nil
 }
