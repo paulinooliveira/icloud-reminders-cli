@@ -942,6 +942,30 @@ class _RemindersAPI:
         return {}
 
 
+class _NoopRemindersAPI:
+    """Stub that skips CloudKit — queue commands write SQLite only."""
+    def __init__(self, db_adapter):
+        self._db = db_adapter
+    def create_reminder(self, title, list_name=None, **kw):
+        return {"guid": "pending-sync", "cloud_id": None}
+    def edit_reminder(self, guid, **kw):
+        pass
+    def complete_reminder(self, guid):
+        pass
+    def delete_reminder(self, guid):
+        pass
+    def get_reminders(self, list_name=None):
+        return []
+
+
+def _make_mgr_local(args):
+    """Build a QueueManager backed by SQLite only — no CloudKit, no auth."""
+    db = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    rem_api = _NoopRemindersAPI(db)
+    list_name = getattr(args, "list", None) or "Sebastian"
+    return QueueManager(db, rem_api, list_name), db
+
+
 def _make_mgr(api, args):
     owner = get_owner(api)
     list_name = getattr(args, "list", None) or "Sebastian"
@@ -955,7 +979,7 @@ def _make_mgr(api, args):
 # ---------------------------------------------------------------------------
 
 def cmd_queue_upsert(args, api):
-    mgr, _ = _make_mgr(api, args)
+    mgr, _ = _make_mgr_local(args)
     items_raw = getattr(args, "item", []) or []
     checklist = [_parse_checklist_line(r) for r in items_raw]
     prio = _PMAP.get(getattr(args, "priority", "") or "", 0)
@@ -998,19 +1022,19 @@ def cmd_queue_state_json(args, api):
 
 
 def cmd_queue_complete(args, api):
-    mgr, _ = _make_mgr(api, args)
+    mgr, _ = _make_mgr_local(args)
     mgr.close(args.key, complete=True)
     print(f"completed: {args.key}")
 
 
 def cmd_queue_delete(args, api):
-    mgr, _ = _make_mgr(api, args)
+    mgr, _ = _make_mgr_local(args)
     mgr.close(args.key, complete=False)
     print(f"deleted: {args.key}")
 
 
 def cmd_queue_child_upsert(args, api):
-    mgr, _ = _make_mgr(api, args)
+    mgr, _ = _make_mgr_local(args)
     prio = _PMAP.get(getattr(args, "priority", "") or "", 0)
     flagged = True if getattr(args, "flagged", False) else (False if getattr(args, "unflagged", False) else None)
     kw = dict(
@@ -1024,7 +1048,7 @@ def cmd_queue_child_upsert(args, api):
 
 
 def cmd_queue_child_complete(args, api):
-    mgr, _ = _make_mgr(api, args)
+    mgr, _ = _make_mgr_local(args)
     mgr.close_child(args.parent_key, args.child_key)
     print(f"child completed: {args.parent_key}/{args.child_key}")
 
@@ -1042,6 +1066,38 @@ def cmd_queue_refresh(args, api):
         die(f"No cloud_id for {args.key!r}; run queue-upsert first")
     rem_api.edit_reminder(item.cloud_id, notes=notes)
     print(f"refreshed: {args.key}  cloud_id={item.cloud_id}")
+
+
+def cmd_queue_sync(args, api):
+    """Push all queue items to Apple Reminders."""
+    owner = get_owner(api)
+    list_name = getattr(args, "list", None) or "Sebastian"
+    db = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    rem_api = _RemindersAPI(api, owner, list_name)
+    items = db.list_queue_items()
+    synced = 0
+    for raw in items:
+        item = _deserialize_item(raw)
+        notes = render_notes(item)
+        title = item.title
+        if item.blocked:
+            title = title.rstrip() + " [blocked]" if "[blocked]" not in title else title
+        try:
+            if not item.cloud_id:
+                result = rem_api.create_reminder(title, priority=item.priority,
+                    notes=notes, flagged=item.flagged, due=item.due)
+                cloud_id = result.get("cloud_id") or result.get("guid")
+                if cloud_id:
+                    db._db.upsert_queue_item(item.key, item.title, cloud_id=cloud_id)
+                    print(f"  created: {item.key} -> {cloud_id}")
+            else:
+                rem_api.edit_reminder(item.cloud_id, title=title, notes=notes,
+                    priority=item.priority, flagged=item.flagged)
+                print(f"  synced: {item.key} ({item.cloud_id})")
+            synced += 1
+        except Exception as e:
+            print(f"  FAILED: {item.key}: {e}", file=sys.stderr)
+    print(f"Synced {synced}/{len(items)} items")
 
 
 def cmd_queue_audit(args, api):
@@ -1148,6 +1204,8 @@ def main():
     p_qr = sub.add_parser("queue-refresh", help="Re-render and push notes for a queue item")
     p_qr.add_argument("key")
 
+    p_qsync = sub.add_parser("queue-sync", help="Push queue items to Apple Reminders")
+    p_qsync.add_argument("--list", "-l", default="Sebastian")
     sub.add_parser("queue-audit", help="Compare queue DB with Apple Reminders")
 
     args = parser.parse_args()
@@ -1156,7 +1214,14 @@ def main():
         sys.exit(1)
 
     # Local-only commands skip iCloud auth entirely (fast, no network)
-    LOCAL_CMDS = {"queue-state-json": cmd_queue_state_json}
+    LOCAL_CMDS = {
+        "queue-state-json": cmd_queue_state_json,
+        "queue-upsert": cmd_queue_upsert,
+        "queue-complete": cmd_queue_complete,
+        "queue-delete": cmd_queue_delete,
+        "queue-child-upsert": cmd_queue_child_upsert,
+        "queue-child-complete": cmd_queue_child_complete,
+    }
     if args.command in LOCAL_CMDS:
         try:
             LOCAL_CMDS[args.command](args, None)
@@ -1175,6 +1240,7 @@ def main():
         "queue-child-upsert": cmd_queue_child_upsert,
         "queue-child-complete": cmd_queue_child_complete,
         "queue-refresh": cmd_queue_refresh,
+        "queue-sync": cmd_queue_sync,
         "queue-audit": cmd_queue_audit,
     }
     try:
