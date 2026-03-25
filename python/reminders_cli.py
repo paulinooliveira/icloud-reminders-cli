@@ -656,18 +656,23 @@ def cmd_delete(args, api):
     tag    = rec.get("recordChangeTag")
     rn     = rec.get("recordName")
 
-    # Soft delete: set Deleted=1 + empty title via update.
-    # Hard deletes cause the Mac to re-push. Empty title triggers native cleanup.
+    # Soft delete: Deleted=1, empty title, bump ResolutionTokenMap.
+    # The counter bump ensures the Mac's CRDT resolver treats this as newer
+    # than its local state, preventing it from re-pushing the old record.
+    existing = rec.get("fields", {})
+    fields = {
+        "Deleted": {"value": 1},
+        "TitleDocument": {"value": encode_title("")},
+        "LastModifiedDate": {"value": int(time.time() * 1000), "type": "TIMESTAMP"},
+        "ResolutionTokenMap": {"value": _bump_resolution_map(existing, ["titleDocument", "deleted"]), "type": "STRING"},
+    }
     ck_post(api, "records/modify", {
         "zoneID": zone_id(owner),
         "operations": [{"operationType": "update", "record": {
             "recordType": rec.get("recordType", "Reminder"),
             "recordName": rn,
             "recordChangeTag": tag,
-            "fields": {
-                "Deleted": {"value": 1},
-                "TitleDocument": {"value": encode_title("")},
-            },
+            "fields": fields,
             "parent": rec.get("parent"),
         }}],
     })
