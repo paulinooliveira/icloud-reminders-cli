@@ -25,7 +25,7 @@ var importSessionCmd = &cobra.Command{
 			return fmt.Errorf("file not found: %s", inputFile)
 		}
 
-		if err := os.MkdirAll(cache.ConfigDir, 0700); err != nil {
+		if err := os.MkdirAll(cache.ConfigDir(), 0700); err != nil {
 			return fmt.Errorf("create config dir: %w", err)
 		}
 
@@ -61,7 +61,7 @@ var importSessionCmd = &cobra.Command{
 				continue
 			}
 
-			outPath := filepath.Join(cache.ConfigDir, name)
+			outPath := filepath.Join(cache.ConfigDir(), name)
 			out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 			if err != nil {
 				return err

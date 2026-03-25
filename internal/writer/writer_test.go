@@ -1,6 +1,7 @@
 package writer
 
 import (
+	"bytes"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
@@ -73,6 +74,70 @@ func TestBuildReminderFieldsPreservesExistingState(t *testing.T) {
 	values := hashtagField["value"].([]interface{})
 	if len(values) != 1 || values[0] != tagIDs[0] {
 		t.Fatalf("hashtag ids mismatch: got %#v", values)
+	}
+}
+
+func TestBuildReminderFieldsPreservesDocumentUUIDOnTextEdit(t *testing.T) {
+	titleDoc, err := utils.EncodeTitle("Original title")
+	if err != nil {
+		t.Fatalf("encode title: %v", err)
+	}
+	notesDoc, err := utils.EncodeTextDocument("Original notes", nil)
+	if err != nil {
+		t.Fatalf("encode notes: %v", err)
+	}
+	titleUUID, ok := utils.ExtractDocumentUUID(titleDoc)
+	if !ok {
+		t.Fatal("expected title uuid")
+	}
+	notesUUID, ok := utils.ExtractDocumentUUID(notesDoc)
+	if !ok {
+		t.Fatal("expected notes uuid")
+	}
+
+	fields, err := buildReminderFields(
+		&cache.ReminderData{
+			Title: "Original title",
+			Notes: strPtr("Original notes"),
+		},
+		ReminderChanges{
+			Title: strPtr("Updated title"),
+			Notes: strPtr("Updated notes"),
+		},
+		map[string]interface{}{
+			"TitleDocument": map[string]interface{}{
+				"value": titleDoc,
+			},
+			"NotesDocument": map[string]interface{}{
+				"value": notesDoc,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+	rewrittenTitleDoc := fields["TitleDocument"].(map[string]interface{})["value"].(string)
+	rewrittenTitleUUID, ok := utils.ExtractDocumentUUID(rewrittenTitleDoc)
+	if !ok {
+		t.Fatal("expected rewritten title uuid")
+	}
+	if !bytes.Equal(titleUUID, rewrittenTitleUUID) {
+		t.Fatalf("title uuid changed: %x vs %x", titleUUID, rewrittenTitleUUID)
+	}
+	if got := utils.ExtractTitle(rewrittenTitleDoc); got != "Updated title" {
+		t.Fatalf("updated title mismatch: got %q", got)
+	}
+
+	rewrittenNotesDoc := fields["NotesDocument"].(map[string]interface{})["value"].(string)
+	rewrittenNotesUUID, ok := utils.ExtractDocumentUUID(rewrittenNotesDoc)
+	if !ok {
+		t.Fatal("expected rewritten notes uuid")
+	}
+	if !bytes.Equal(notesUUID, rewrittenNotesUUID) {
+		t.Fatalf("notes uuid changed: %x vs %x", notesUUID, rewrittenNotesUUID)
+	}
+	if got := utils.ExtractTitle(rewrittenNotesDoc); got != "Updated notes" {
+		t.Fatalf("updated notes mismatch: got %q", got)
 	}
 }
 
@@ -234,6 +299,51 @@ func TestBuildReminderFieldsBumpsReminderResolutionTokens(t *testing.T) {
 	}
 	if got := int(m["lastModifiedDate"].(map[string]interface{})["counter"].(float64)); got != 8 {
 		t.Fatalf("lastModifiedDate counter mismatch: got %d", got)
+	}
+}
+
+func TestBuildReminderFieldsPreservesLiveTextDocumentsOnNonTextEdit(t *testing.T) {
+	titleDoc, err := utils.EncodeTitle("Morning Day Briefing [daily 8:30am]")
+	if err != nil {
+		t.Fatalf("encode title: %v", err)
+	}
+	notesText := "0 / 1.5h, 0 / 160k tk. Act. 10:14p\n[ ] Refresh p-reader evidence pack"
+	notesDoc, err := utils.EncodeTitle(notesText)
+	if err != nil {
+		t.Fatalf("encode notes: %v", err)
+	}
+	fields, err := buildReminderFields(
+		&cache.ReminderData{
+			Title:    "Morning Day Briefing [daily 8:30am]",
+			Notes:    &notesText,
+			Priority: models.PriorityMap["low"],
+		},
+		ReminderChanges{
+			Priority: intPtr(models.PriorityMap["medium"]),
+		},
+		map[string]interface{}{
+			"TitleDocument": map[string]interface{}{
+				"value": titleDoc,
+			},
+			"NotesDocument": map[string]interface{}{
+				"value": notesDoc,
+			},
+			"ResolutionTokenMap": map[string]interface{}{
+				"value": `{"map":{"priority":{"replicaID":"RID-1","counter":2,"modificationTime":10},"lastModifiedDate":{"replicaID":"RID-2","counter":3,"modificationTime":20}}}`,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("buildReminderFields: %v", err)
+	}
+	if got := fields["TitleDocument"].(map[string]interface{})["value"].(string); got != titleDoc {
+		t.Fatalf("expected live title document to be preserved")
+	}
+	if got := fields["NotesDocument"].(map[string]interface{})["value"].(string); got != notesDoc {
+		t.Fatalf("expected live notes document to be preserved")
+	}
+	if got := fields["Priority"].(map[string]interface{})["value"]; got != models.PriorityMap["medium"] {
+		t.Fatalf("priority mismatch: got %#v", got)
 	}
 }
 
@@ -497,6 +607,8 @@ func TestNormalizeTagNames(t *testing.T) {
 }
 
 func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
+	t.Setenv("ICLOUD_REMINDERS_CONFIG_DIR", t.TempDir())
+
 	tmpDir := t.TempDir()
 	sshPath := filepath.Join(tmpDir, "ssh")
 	callFile := filepath.Join(tmpDir, "calls")
@@ -550,6 +662,55 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	}
 	if alias := w.Sync.Cache.Reminders["ABC"]; alias == nil || alias.Title != "Updated title" {
 		t.Fatalf("expected alias cache update, got %#v", alias)
+	}
+}
+
+func TestRepairVisibleTextStateUsesValidatorStoreRepair(t *testing.T) {
+	t.Setenv("ICLOUD_REMINDERS_CONFIG_DIR", t.TempDir())
+
+	tmpDir := t.TempDir()
+	sshPath := filepath.Join(tmpDir, "ssh")
+	callFile := filepath.Join(tmpDir, "calls")
+	script := "#!/bin/sh\n" +
+		"count=0\n" +
+		"if [ -f " + writerShellQuote(callFile) + " ]; then count=$(cat " + writerShellQuote(callFile) + "); fi\n" +
+		"count=$((count+1))\n" +
+		"printf '%s' \"$count\" > " + writerShellQuote(callFile) + "\n" +
+		"if [ \"$count\" -eq 1 ]; then printf '%s' '1'; else printf '%s' '{\"id\":\"x-apple-reminder://ABC\",\"title\":\"Updated title\",\"completed\":false,\"body\":\"Updated body\"}'; fi\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", tmpDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	defer os.Setenv("PATH", oldPath)
+
+	t.Setenv("ICLOUD_REMINDERS_VALIDATOR_TYPE", "apple-ssh")
+	t.Setenv("ICLOUD_REMINDERS_VALIDATOR_HOST", "example-host")
+	t.Setenv("ICLOUD_REMINDERS_VALIDATOR_USER", "tester")
+	t.Setenv("ICLOUD_REMINDERS_VALIDATOR_IDENTITY_PATH", "/tmp/key")
+
+	notes := "Updated body"
+	engine := &iclouddsync.Engine{
+		Cache: &cache.Cache{
+			Reminders: map[string]*cache.ReminderData{
+				"Reminder/ABC": {
+					Title: "Updated title",
+					Notes: &notes,
+				},
+			},
+			Sections: map[string]*cache.SectionData{},
+			Hashtags: map[string]*cache.HashtagData{},
+			Lists:    map[string]string{},
+		},
+	}
+	w := &Writer{Sync: engine}
+	if err := w.repairVisibleTextState("Reminder/ABC", engine.Cache.Reminders["Reminder/ABC"], ReminderChanges{
+		Title: strPtr("Updated title"),
+		Notes: strPtr("Updated body"),
+	}); err != nil {
+		t.Fatalf("repairVisibleTextState error: %v", err)
 	}
 }
 

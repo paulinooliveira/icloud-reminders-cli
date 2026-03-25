@@ -567,19 +567,29 @@ func RenderFirstLine(item StateItem, now time.Time, loc *time.Location) string {
 	if !now.IsZero() && loc != nil {
 		localNow = now.In(loc)
 	}
-	model := strings.TrimSpace(item.LastModel)
-	if model == "" {
-		model = "unknown-model"
-	}
-	return fmt.Sprintf(
-		"%s / %sh, %s / %s tk. Act. %s %s",
+	model := normalizeRenderedModelLabel(item.LastModel)
+	line := fmt.Sprintf(
+		"%s / %sh, %s / %s tk. Act. %s",
 		formatHours(burn.HoursSpent),
 		formatHours(item.HoursBudget),
 		formatTokens(burn.TokensSpent),
 		formatTokens(item.TokensBudget),
 		formatClock(localNow),
-		model,
 	)
+	if model != "" {
+		line = fmt.Sprintf("%s %s", line, model)
+	}
+	return line
+}
+
+func normalizeRenderedModelLabel(raw string) string {
+	model := strings.TrimSpace(raw)
+	switch strings.ToLower(model) {
+	case "", "inherit", "inherited", "auto", "unknown", "unknown model":
+		return ""
+	default:
+		return model
+	}
 }
 
 func ComputeBurn(item StateItem, now time.Time) BurnSnapshot {

@@ -125,27 +125,41 @@ func TestCleanupEmptySectionsInStoreParsesJSON(t *testing.T) {
 	}
 }
 
-func TestBuildUpdateReminderAppleScriptClearsTextBeforeSetting(t *testing.T) {
+func TestBuildStoreUpdatePythonScriptUsesDirectReplacement(t *testing.T) {
 	title := "Morning"
 	body := "0 / 1h, 0 / 10k tk."
-	script := buildUpdateReminderAppleScript("x-apple-reminder://ABC", &title, &body, nil)
-	if !strings.Contains(script, "set name of r to \"\"") {
-		t.Fatalf("expected title clear step, got %q", script)
+	script := buildStoreUpdatePythonScript("ABC", &title, &body, "tester")
+	if !strings.Contains(script, `ZTITLE = ?`) {
+		t.Fatalf("expected title store update, got %q", script)
 	}
-	if !strings.Contains(script, "set name of r to \"Morning\"") {
-		t.Fatalf("expected title set step, got %q", script)
+	if !strings.Contains(script, `ZNOTES = ?`) {
+		t.Fatalf("expected notes store update, got %q", script)
 	}
-	if !strings.Contains(script, "set body of r to \"\"") {
-		t.Fatalf("expected body clear step, got %q", script)
+	if strings.Contains(script, `set name of r`) || strings.Contains(script, `set body of r`) {
+		t.Fatalf("expected store update script, got AppleScript-like text %q", script)
 	}
-	if !strings.Contains(script, "set body of r to \"0 / 1h, 0 / 10k tk.\"") {
-		t.Fatalf("expected body set step, got %q", script)
+	if !strings.Contains(script, `where ZCKIDENTIFIER = ?`) {
+		t.Fatalf("expected exact reminder lookup, got %q", script)
 	}
-	if strings.Index(script, "set name of r to \"\"") > strings.Index(script, "set name of r to \"Morning\"") {
-		t.Fatalf("expected title clear before set, got %q", script)
+	if !strings.Contains(script, `username = "tester"`) {
+		t.Fatalf("expected username binding, got %q", script)
 	}
-	if strings.Index(script, "set body of r to \"\"") > strings.Index(script, "set body of r to \"0 / 1h, 0 / 10k tk.\"") {
-		t.Fatalf("expected body clear before set, got %q", script)
+	if !strings.Contains(script, `f"/Users/{username}/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"`) {
+		t.Fatalf("expected interpolated user path, got %q", script)
+	}
+	if strings.Contains(script, `"/Users/"tester"`) {
+		t.Fatalf("expected valid Python string composition, got %q", script)
+	}
+}
+
+func TestBuildUpdateReminderAppleScriptOnlyTouchesCompletion(t *testing.T) {
+	completed := true
+	script := buildUpdateReminderAppleScript("x-apple-reminder://ABC", nil, nil, &completed)
+	if strings.Contains(script, "set name of r") || strings.Contains(script, "set body of r") {
+		t.Fatalf("expected no text edits in AppleScript, got %q", script)
+	}
+	if !strings.Contains(script, "set completed of r to true") {
+		t.Fatalf("expected completed update, got %q", script)
 	}
 }
 

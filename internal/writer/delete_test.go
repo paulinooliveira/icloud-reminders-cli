@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -255,16 +254,8 @@ func writeDeleteTestJSON(t *testing.T, w http.ResponseWriter, payload map[string
 func newDeleteTestWriter(t *testing.T, server *deleteTestServer) (*Writer, string, string, func()) {
 	t.Helper()
 
-	origDir := cache.ConfigDir
-	origFile := cache.CacheFile
 	tmpDir := t.TempDir()
-	cache.ConfigDir = tmpDir
-	cache.CacheFile = filepath.Join(tmpDir, "ck_cache.json")
-
-	restore := func() {
-		cache.ConfigDir = origDir
-		cache.CacheFile = origFile
-	}
+	t.Setenv("ICLOUD_REMINDERS_CONFIG_DIR", tmpDir)
 
 	engine := &iclouddsync.Engine{
 		Cache: &cache.Cache{
@@ -284,5 +275,5 @@ func newDeleteTestWriter(t *testing.T, server *deleteTestServer) (*Writer, strin
 	engine.Cache.Reminders[strings.TrimPrefix(server.reminderID, "Reminder/")] = &cache.ReminderData{}
 
 	client := cloudkit.NewWithHTTPClient(server.URL(), server.srv.Client())
-	return New(client, engine), rd.Title, server.reminderID, restore
+	return New(client, engine), rd.Title, server.reminderID, func() {}
 }

@@ -331,18 +331,21 @@ func replayOperation(db *sql.DB, op *store.Operation) error {
 			}
 			now := time.Now()
 			finalSpec, preview := finalizeQueueSpec(state, payload.Spec, now)
-			appleID, cloudID, err := reconcileQueueReminder(finalSpec, state.Items[payload.Spec.Key], payload.PriorityLabel, payload.ListOverride)
+			reconciled, err := reconcileQueueReminder(finalSpec, state.Items[payload.Spec.Key], payload.PriorityLabel, payload.ListOverride)
 			if err != nil {
 				return mutationOutcome{}, err
 			}
-			preview.AppleID = appleID
-			preview.CloudID = cloudID
+			preview.AppleID = reconciled.AppleID
+			preview.CloudID = reconciled.CloudID
+			if reconciled.Children != nil {
+				preview.Children = reconciled.Children
+			}
 			preview.UpdatedAt = now.Format(time.RFC3339)
 			state.Items[payload.Spec.Key] = preview
 			if err := state.Save(); err != nil {
 				return mutationOutcome{}, err
 			}
-			return mutationOutcome{Backend: map[string]interface{}{"cloud_id": cloudID, "apple_id": appleID}, CloudID: cloudID, AppleID: appleID, Title: preview.Title, Projection: preview}, nil
+			return mutationOutcome{Backend: map[string]interface{}{"cloud_id": reconciled.CloudID, "apple_id": reconciled.AppleID}, CloudID: reconciled.CloudID, AppleID: reconciled.AppleID, Title: preview.Title, Projection: preview}, nil
 		case "queue-refresh":
 			var payload queueKeyPayload
 			if err := json.Unmarshal([]byte(op.DesiredJSON), &payload); err != nil {
@@ -376,18 +379,21 @@ func replayOperation(db *sql.DB, op *store.Operation) error {
 				Executor: item.Executor, Blocked: blockedPtr,
 			}
 			finalSpec, preview := finalizeQueueSpec(state, spec, time.Now())
-			appleID, cloudID, err := reconcileQueueReminder(finalSpec, item, priorityLabelFromValue(item.Priority), "")
+			reconciled, err := reconcileQueueReminder(finalSpec, item, priorityLabelFromValue(item.Priority), "")
 			if err != nil {
 				return mutationOutcome{}, err
 			}
-			preview.AppleID = appleID
-			preview.CloudID = cloudID
+			preview.AppleID = reconciled.AppleID
+			preview.CloudID = reconciled.CloudID
+			if reconciled.Children != nil {
+				preview.Children = reconciled.Children
+			}
 			preview.UpdatedAt = time.Now().Format(time.RFC3339)
 			state.Items[payload.Key] = preview
 			if err := state.Save(); err != nil {
 				return mutationOutcome{}, err
 			}
-			return mutationOutcome{Backend: map[string]interface{}{"cloud_id": cloudID, "apple_id": appleID}, CloudID: cloudID, AppleID: appleID, Title: preview.Title, Projection: preview}, nil
+			return mutationOutcome{Backend: map[string]interface{}{"cloud_id": reconciled.CloudID, "apple_id": reconciled.AppleID}, CloudID: reconciled.CloudID, AppleID: reconciled.AppleID, Title: preview.Title, Projection: preview}, nil
 		case "queue-complete":
 			var payload queueKeyPayload
 			if err := json.Unmarshal([]byte(op.DesiredJSON), &payload); err != nil {

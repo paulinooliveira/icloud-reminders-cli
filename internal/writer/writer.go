@@ -290,56 +290,8 @@ func (w *Writer) AddRemindersBatch(titles []string, listName, parentID string) (
 
 // CompleteReminder marks a reminder as complete.
 func (w *Writer) CompleteReminder(reminderID string) (map[string]interface{}, error) {
-	ownerID, err := w.ownerID()
-	if err != nil {
-		return errResult(err), nil
-	}
-
-	fullID, rd, err := w.resolveReminderRecord(reminderID)
-	if err != nil {
-		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
-	}
-	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
-		return errResult(fmt.Errorf("missing change tag for '%s' — try running 'sync' first", reminderID)), nil
-	}
-
-	now := time.Now().UnixMilli()
-	op := map[string]interface{}{
-		"operationType": "update",
-		"record": map[string]interface{}{
-			"recordType":      "Reminder",
-			"recordName":      fullID,
-			"recordChangeTag": *rd.ChangeTag,
-			"fields": map[string]interface{}{
-				"Completed":      map[string]interface{}{"value": true},
-				"CompletionDate": map[string]interface{}{"value": now},
-			},
-		},
-	}
-
-	logger.Debugf("complete: updating record %s", fullID)
-	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{op})
-	if err != nil {
-		return errResult(err), nil
-	}
-	if _, hasErr := result["error"]; !hasErr {
-		rd.Completed = true
-		nowStr := utils.TsToStr(now)
-		rd.CompletionDate = &nowStr
-		// Update change tag from response
-		if records, ok := result["records"].([]interface{}); ok && len(records) > 0 {
-			if rec, ok := records[0].(map[string]interface{}); ok {
-				if ct, ok := rec["recordChangeTag"].(string); ok {
-					rd.ChangeTag = &ct
-				}
-			}
-		}
-		if err := w.Sync.Cache.Save(); err != nil {
-			logger.Warnf("cache save failed: %v", err)
-		}
-		logger.Infof("Completed reminder: %q (%s)", rd.Title, reminderID)
-	}
-	return result, nil
+	completed := true
+	return w.EditReminder(reminderID, ReminderChanges{Completed: &completed})
 }
 
 // DeleteReminder deletes a reminder.
@@ -351,6 +303,15 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 
 	fullID, rd, err := w.resolveReminderRecord(reminderID)
 	if err != nil {
+		// Deletion should be idempotent for ID-like hints: if the record is already
+		// gone, converge by cleaning any local cache aliases and returning success.
+		if isReminderIDHint(reminderID) {
+			w.deleteReminderCacheAliases(reminderID)
+			if err := w.Sync.Cache.Save(); err != nil {
+				logger.Warnf("cache save failed: %v", err)
+			}
+			return map[string]interface{}{"missing": true, "id": reminderID}, nil
+		}
 		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
 	}
 	if rd == nil || rd.ChangeTag == nil || *rd.ChangeTag == "" {
@@ -359,6 +320,17 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 
 	record, err := lookupRecord(w.CK, ownerID, fullID)
 	if err != nil {
+		// If CloudKit already says it is missing, treat this as a successful
+		// idempotent delete and converge local cache state.
+		if isMissingLookupError(err) {
+			for _, alias := range cache.ReminderAliases(fullID) {
+				delete(w.Sync.Cache.Reminders, alias)
+			}
+			if err := w.Sync.Cache.Save(); err != nil {
+				logger.Warnf("cache save failed: %v", err)
+			}
+			return map[string]interface{}{"missing": true, "id": fullID}, nil
+		}
 		return errResult(err), nil
 	}
 	if ct, _ := record["recordChangeTag"].(string); ct != "" {
@@ -429,6 +401,39 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 		}
 	}
 	return errResult(fmt.Errorf("delete reminder %s exceeded child cleanup retries", reminderID)), nil
+}
+
+func isReminderIDHint(hint string) bool {
+	if hint == "" {
+		return false
+	}
+	if strings.HasPrefix(hint, "Reminder/") {
+		return true
+	}
+	return looksLikeUUID(hint)
+}
+
+func isMissingLookupError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "unknown item")
+}
+
+func (w *Writer) deleteReminderCacheAliases(hint string) {
+	// Only scrub exact ID-derived aliases; never guess by title here.
+	for _, alias := range cache.ReminderAliases(hint) {
+		delete(w.Sync.Cache.Reminders, alias)
+	}
+	// Also scrub upper-cased variants because CloudKit record names commonly
+	// normalize UUID casing.
+	if looksLikeUUID(hint) {
+		upper := strings.ToUpper(hint)
+		for _, alias := range cache.ReminderAliases(upper) {
+			delete(w.Sync.Cache.Reminders, alias)
+		}
+	}
 }
 
 func (w *Writer) verifyReminderDeleted(ownerID, recordName string) error {
@@ -610,6 +615,17 @@ func extractBlockingRecordName(err error) string {
 // EditReminder updates one or more fields on an existing reminder.
 // Pass non-empty values only for fields you want to change.
 func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[string]interface{}, error) {
+	return w.editReminderInternal(reminderID, changes, true)
+}
+
+// EditReminderNoVisibleRepair edits a reminder via CloudKit but skips the Apple-bridge
+// "visible text repair" step. This avoids unsafe CRDT mutation paths when running
+// in headless or non-Mac environments.
+func (w *Writer) EditReminderNoVisibleRepair(reminderID string, changes ReminderChanges) (map[string]interface{}, error) {
+	return w.editReminderInternal(reminderID, changes, false)
+}
+
+func (w *Writer) editReminderInternal(reminderID string, changes ReminderChanges, repairVisible bool) (map[string]interface{}, error) {
 	ownerID, err := w.ownerID()
 	if err != nil {
 		return errResult(err), nil
@@ -679,6 +695,11 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 	if err := w.Sync.Cache.Save(); err != nil {
 		logger.Warnf("cache save failed: %v", err)
 	}
+	if repairVisible {
+		if err := w.repairVisibleTextState(fullID, rd, changes); err != nil {
+			logger.Warnf("edit: visible-state repair failed for %s: %v", fullID, err)
+		}
+	}
 	logger.Infof("Edited reminder: %q (%s)", rd.Title, reminderID)
 	return result, nil
 }
@@ -732,6 +753,52 @@ func (w *Writer) SafeTextEditReminder(reminderID string, title, notes *string, b
 		"id":       fullID,
 		"apple_id": appleID,
 	}, nil
+}
+
+func (w *Writer) repairVisibleTextState(fullID string, rd *cache.ReminderData, changes ReminderChanges) error {
+	if rd == nil || (changes.Title == nil && changes.Notes == nil) {
+		return nil
+	}
+	cfg := applebridge.LoadValidatorConfigFromEnv()
+	if cfg == nil {
+		return nil
+	}
+	bridge := applebridge.New(cfg)
+	appleID := "x-apple-reminder://" + shortID(fullID)
+
+	var titlePtr *string
+	if changes.Title != nil {
+		titleCopy := rd.Title
+		titlePtr = &titleCopy
+	}
+	var notesPtr *string
+	if changes.Notes != nil {
+		notesCopy := ""
+		if rd.Notes != nil {
+			notesCopy = *rd.Notes
+		}
+		notesPtr = &notesCopy
+	}
+	if titlePtr == nil && notesPtr == nil {
+		return nil
+	}
+	if err := bridge.UpdateReminder(appleID, titlePtr, notesPtr, nil); err != nil {
+		return err
+	}
+	live, err := bridge.GetReminder(appleID)
+	if err != nil {
+		return err
+	}
+	if live == nil {
+		return fmt.Errorf("validator returned no reminder for %s", appleID)
+	}
+	if titlePtr != nil && live.Title != *titlePtr {
+		return fmt.Errorf("title mismatch after repair: got %q want %q", live.Title, *titlePtr)
+	}
+	if notesPtr != nil && live.Body != *notesPtr {
+		return fmt.Errorf("notes mismatch after repair: got %q want %q", live.Body, *notesPtr)
+	}
+	return nil
 }
 
 // ReopenReminder marks a reminder as to-do again and clears its completion date.
@@ -1148,9 +1215,17 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges, l
 	if title == "" {
 		return nil, fmt.Errorf("title cannot be empty")
 	}
-	encodedTitle, err := utils.EncodeTitle(title)
-	if err != nil {
-		return nil, fmt.Errorf("encode title: %w", err)
+	titleDocument := ""
+	if changes.Title == nil && len(liveFields) > 0 && liveFields[0] != nil {
+		titleDocument = getFieldStringValue(liveFields[0], "TitleDocument")
+	}
+	if titleDocument == "" {
+		titleUUID := liveTextDocumentUUID(liveFields, "TitleDocument")
+		encodedTitle, err := utils.EncodeTextDocument(title, titleUUID)
+		if err != nil {
+			return nil, fmt.Errorf("encode title: %w", err)
+		}
+		titleDocument = encodedTitle
 	}
 
 	completed := current.Completed
@@ -1172,7 +1247,7 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges, l
 	}
 
 	fields := map[string]interface{}{
-		"TitleDocument": map[string]interface{}{"value": encodedTitle},
+		"TitleDocument": map[string]interface{}{"value": titleDocument},
 		"Completed":     map[string]interface{}{"value": boolToInt(completed)},
 		"Flagged":       map[string]interface{}{"value": boolToInt(flagged)},
 		"Priority":      map[string]interface{}{"value": priority},
@@ -1239,15 +1314,27 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges, l
 			notes = changes.Notes
 		}
 	}
+	notesDocument := ""
+	if changes.Notes == nil && len(liveFields) > 0 && liveFields[0] != nil {
+		notesDocument = getFieldStringValue(liveFields[0], "NotesDocument")
+	}
 	if notes != nil && *notes != "" {
-		encodedNotes, err := utils.EncodeTitle(*notes)
-		if err != nil {
-			return nil, fmt.Errorf("encode notes: %w", err)
+		if notesDocument == "" {
+			notesUUID := liveTextDocumentUUID(liveFields, "NotesDocument")
+			encodedNotes, err := utils.EncodeTextDocument(*notes, notesUUID)
+			if err != nil {
+				return nil, fmt.Errorf("encode notes: %w", err)
+			}
+			notesDocument = encodedNotes
 		}
-		fields["NotesDocument"] = map[string]interface{}{"value": encodedNotes}
+		fields["NotesDocument"] = map[string]interface{}{"value": notesDocument}
 	}
 
 	completionDate := current.CompletionDate
+	if changes.Completed != nil && *changes.Completed && (completionDate == nil || strings.TrimSpace(*completionDate) == "") {
+		nowStr := utils.TsToStr(time.Now().UnixMilli())
+		completionDate = &nowStr
+	}
 	if changes.Completed != nil && !*changes.Completed {
 		completionDate = nil
 	}
@@ -1272,6 +1359,17 @@ func buildReminderFields(current *cache.ReminderData, changes ReminderChanges, l
 	}
 
 	return fields, nil
+}
+
+func liveTextDocumentUUID(liveFields []map[string]interface{}, fieldName string) []byte {
+	if len(liveFields) == 0 || liveFields[0] == nil {
+		return nil
+	}
+	uuid, ok := utils.ExtractDocumentUUID(getFieldStringValue(liveFields[0], fieldName))
+	if !ok {
+		return nil
+	}
+	return uuid
 }
 
 func bumpReminderResolutionTokenMap(fields map[string]interface{}, keys []string, nowMillis int64) string {

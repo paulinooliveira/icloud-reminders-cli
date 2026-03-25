@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,8 @@ type mutationOutcome struct {
 	ListID           string
 	Title            string
 	DeleteProjection bool
+	Verified         bool
+	Verify           func() error
 }
 
 func executeMutation(kind, targetType, targetKey string, payload any, useLock bool, exec func() (mutationOutcome, error)) error {
@@ -71,8 +74,7 @@ func runRecordedOperation(db *sql.DB, op *store.Operation, useLock bool, exec fu
 		}
 
 		op.AppliedAt = time.Now().UTC().Format(time.RFC3339)
-		op.VerifiedAt = op.AppliedAt
-		op.Status = "verified"
+		op.Status = "applied"
 		op.ErrorText = ""
 		if len(outcome.Backend) > 0 {
 			backendJSON, err := json.Marshal(outcome.Backend)
@@ -97,6 +99,24 @@ func runRecordedOperation(db *sql.DB, op *store.Operation, useLock bool, exec fu
 		if err := store.UpdateOperation(db, *op); err != nil {
 			return err
 		}
+
+		if outcome.Verify != nil {
+			if err := outcome.Verify(); err != nil {
+				op.Status = "reconcile_needed"
+				op.ErrorText = err.Error()
+				_ = store.UpdateOperation(db, *op)
+				return err
+			}
+			outcome.Verified = true
+		}
+		if outcome.Verified {
+			op.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
+			op.Status = "verified"
+			op.ErrorText = ""
+			if err := store.UpdateOperation(db, *op); err != nil {
+				return err
+			}
+		}
 		return pruneHistoricalOperationsForTarget(db, op.TargetType, op.TargetKey)
 	}
 
@@ -113,5 +133,5 @@ func joinMutationErrors(primary, secondary error) error {
 	if secondary == nil {
 		return primary
 	}
-	return secondary
+	return fmt.Errorf("%v (also failed to update operation journal: %v)", primary, secondary)
 }

@@ -7,6 +7,9 @@ func bestEffortSync() error {
 }
 
 func shouldProceedWithoutSync(hint string) bool {
+	if !allowStaleTarget {
+		return false
+	}
 	if strings.HasPrefix(hint, "Reminder/") {
 		return true
 	}

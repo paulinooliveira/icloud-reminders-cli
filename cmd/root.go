@@ -16,6 +16,7 @@ import (
 
 // verbosity is incremented once per -v flag: -v=1 (info), -vv=2 (debug).
 var verbosity int
+var allowStaleTarget bool
 
 // shared per-invocation state (set in PersistentPreRunE)
 var (
@@ -47,7 +48,7 @@ var RootCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("cloudkit init: %w", err)
 		}
-		syncEngine = sync.New(ckClient, cache.SessionFile)
+		syncEngine = sync.New(ckClient, cache.SessionFile())
 		w = writer.New(ckClient, syncEngine)
 		return nil
 	},
@@ -57,12 +58,13 @@ var RootCmd = &cobra.Command{
 // If no valid session exists, returns error prompting for auth.
 func loadSession(forceReauth bool) (*auth.SessionData, error) {
 	a := auth.New()
-	return a.EnsureSession(cache.SessionFile, forceReauth)
+	return a.EnsureSession(cache.SessionFile(), forceReauth)
 }
 
 func init() {
 	// CountP increments verbosity each time -v is passed: -v=1, -vv=2
 	RootCmd.PersistentFlags().CountVarP(&verbosity, "verbose", "v", "Verbosity: -v info, -vv debug")
+	RootCmd.PersistentFlags().BoolVar(&allowStaleTarget, "allow-stale-target", false, "Allow destructive writes when sync fails (unsafe; prefer running 'sync' first)")
 
 	RootCmd.AddCommand(
 		authCmd,

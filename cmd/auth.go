@@ -29,7 +29,7 @@ When the session expires, run 'reminders auth' again to re-authenticate.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		force, _ := cmd.Flags().GetBool("force")
 		a := auth.New()
-		sess, err := a.EnsureSession(cache.SessionFile, force)
+		sess, err := a.EnsureSession(cache.SessionFile(), force)
 		if err != nil {
 			return err
 		}

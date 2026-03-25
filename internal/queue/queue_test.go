@@ -264,6 +264,51 @@ func TestRenderNotesUsesDeterministicFirstLine(t *testing.T) {
 	}
 }
 
+func TestRenderNotesOmitsUnknownModelPlaceholderWhenModelMissing(t *testing.T) {
+	t.Parallel()
+
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	now := time.Date(2026, 3, 24, 16, 32, 0, 0, loc)
+	item := StateItem{
+		HoursBudget:  1.5,
+		TokensBudget: 160000,
+		StatusLine:   "next run Wed 08:30; last run ok 10m",
+	}
+
+	got := RenderNotes(item, now, loc)
+	want := "0 / 1.5h, 0 / 160k tk. Act. 4:32p\nnext run Wed 08:30; last run ok 10m"
+	if got != want {
+		t.Fatalf("unexpected notes without model:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestRenderNotesOmitsInheritedModelLabel(t *testing.T) {
+	t.Parallel()
+
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	now := time.Date(2026, 3, 24, 16, 32, 0, 0, loc)
+	item := StateItem{
+		HoursBudget:  1.5,
+		TokensBudget: 160000,
+		LastModel:    "inherit",
+		Checklist: []ChecklistItem{
+			{Marker: "x", Text: "refresh p-reader evidence pack"},
+		},
+	}
+
+	got := RenderNotes(item, now, loc)
+	want := "0 / 1.5h, 0 / 160k tk. Act. 4:32p\n[x] refresh p-reader evidence pack"
+	if got != want {
+		t.Fatalf("unexpected notes with inherited model:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 func TestSettleLeaseRollsIntoSettledBurn(t *testing.T) {
 	t.Parallel()
 

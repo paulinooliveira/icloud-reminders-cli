@@ -100,21 +100,24 @@ var queueUpsertCmd = &cobra.Command{
 				}
 				now := time.Now()
 				finalSpec, preview := finalizeQueueSpec(state, spec, now)
-				appleID, cloudID, err := reconcileQueueReminder(finalSpec, state.Items[key], queuePriority, queueList)
+				reconciled, err := reconcileQueueReminder(finalSpec, state.Items[key], queuePriority, queueList)
 				if err != nil {
 					return mutationOutcome{}, err
 				}
-				preview.AppleID = appleID
-				preview.CloudID = cloudID
+				preview.AppleID = reconciled.AppleID
+				preview.CloudID = reconciled.CloudID
+				if reconciled.Children != nil {
+					preview.Children = reconciled.Children
+				}
 				preview.UpdatedAt = now.Format(time.RFC3339)
 				state.Items[key] = preview
 				if err := state.Save(); err != nil {
 					return mutationOutcome{}, err
 				}
 				return mutationOutcome{
-					Backend:    map[string]interface{}{"cloud_id": cloudID, "apple_id": appleID},
-					CloudID:    cloudID,
-					AppleID:    appleID,
+					Backend:    map[string]interface{}{"cloud_id": reconciled.CloudID, "apple_id": reconciled.AppleID},
+					CloudID:    reconciled.CloudID,
+					AppleID:    reconciled.AppleID,
 					Title:      preview.Title,
 					Projection: preview,
 				}, nil

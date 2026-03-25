@@ -24,7 +24,7 @@ var exportSessionCmd = &cobra.Command{
 		}
 
 		// Export the known session files by path, not by extension scan.
-		candidates := []string{cache.SessionFile, cache.CacheFile}
+		candidates := []string{cache.SessionFile(), cache.CacheFile()}
 		var sessionFiles []string
 		for _, p := range candidates {
 			if _, err := os.Stat(p); err == nil {
@@ -33,7 +33,7 @@ var exportSessionCmd = &cobra.Command{
 		}
 
 		if len(sessionFiles) == 0 {
-			return fmt.Errorf("no session files found in %s — please run 'reminders auth' first", cache.ConfigDir)
+			return fmt.Errorf("no session files found in %s — please run 'reminders auth' first", cache.ConfigDir())
 		}
 
 		out, err := os.Create(outputFile)

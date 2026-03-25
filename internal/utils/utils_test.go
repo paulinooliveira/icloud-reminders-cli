@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
@@ -53,6 +54,32 @@ func TestExtractTitleMalformedPayload(t *testing.T) {
 	got := ExtractTitle("bm90LWEtZ3ppcC1wcm90bw==")
 	if got != "not-a-gzip-proto" {
 		t.Fatalf("ExtractTitle malformed fallback mismatch: got %q", got)
+	}
+}
+
+func TestEncodeTextDocumentPreservesDocumentUUID(t *testing.T) {
+	encoded, err := EncodeTitle("Original title")
+	if err != nil {
+		t.Fatalf("EncodeTitle: %v", err)
+	}
+	uuid, ok := ExtractDocumentUUID(encoded)
+	if !ok {
+		t.Fatal("expected document uuid")
+	}
+
+	rewritten, err := EncodeTextDocument("Updated title", uuid)
+	if err != nil {
+		t.Fatalf("EncodeTextDocument: %v", err)
+	}
+	rewrittenUUID, ok := ExtractDocumentUUID(rewritten)
+	if !ok {
+		t.Fatal("expected rewritten document uuid")
+	}
+	if !bytes.Equal(uuid, rewrittenUUID) {
+		t.Fatalf("document uuid changed: %x vs %x", uuid, rewrittenUUID)
+	}
+	if got := ExtractTitle(rewritten); got != "Updated title" {
+		t.Fatalf("updated title mismatch: got %q", got)
 	}
 }
 

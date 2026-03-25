@@ -62,11 +62,22 @@ func position(replica uint64, offset int64) []byte {
 //
 // IMPORTANT: Apple uses CHARACTER length (not byte length) for CRDT metadata.
 func EncodeTitle(title string) (string, error) {
-	titleBytes := []byte(title)
-	charLen := uint64(utf8.RuneCountInString(title)) // CHARACTER count for CRDT
+	return EncodeTextDocument(title, nil)
+}
 
-	// Generate a random UUID for the document
-	docUUID := generateUUID()
+// EncodeTextDocument encodes a reminder text document (title or notes) as
+// Apple's CRDT protobuf, gzip-compressed and base64-encoded.
+//
+// If docUUID is non-empty, the existing document identity is preserved.
+func EncodeTextDocument(text string, docUUID []byte) (string, error) {
+	textBytes := []byte(text)
+	charLen := uint64(utf8.RuneCountInString(text)) // CHARACTER count for CRDT
+
+	if len(docUUID) != 16 {
+		docUUID = generateUUID()
+	} else {
+		docUUID = append([]byte(nil), docUUID...)
+	}
 
 	// CRDT Op #1: Initial position
 	op1 := make([]byte, 0, 64)
@@ -103,7 +114,7 @@ func EncodeTitle(title string) (string, error) {
 
 	// Note content (field 3 in Document)
 	note := make([]byte, 0, 256)
-	note = append(note, EncodeField(2, 2, titleBytes)...)
+	note = append(note, EncodeField(2, 2, textBytes)...)
 	note = append(note, EncodeField(3, 2, op1)...)
 	note = append(note, EncodeField(3, 2, op2)...)
 	note = append(note, EncodeField(3, 2, op3)...)
@@ -132,6 +143,50 @@ func EncodeTitle(title string) (string, error) {
 	}
 
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+// ExtractDocumentUUID extracts the stable document UUID from a base64-encoded
+// gzip CRDT reminder text document.
+func ExtractDocumentUUID(tdB64 string) ([]byte, bool) {
+	if tdB64 == "" {
+		return nil, false
+	}
+	raw, err := base64.StdEncoding.DecodeString(tdB64)
+	if err != nil {
+		return nil, false
+	}
+	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
+		return nil, false
+	}
+	r, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, false
+	}
+	dec, err := io.ReadAll(r)
+	if err != nil {
+		return nil, false
+	}
+	docs, err := extractLengthDelimitedField(dec, 2)
+	if err != nil || len(docs) == 0 {
+		return nil, false
+	}
+	notes, err := extractLengthDelimitedField(docs[0], 3)
+	if err != nil || len(notes) == 0 {
+		return nil, false
+	}
+	metas, err := extractLengthDelimitedField(notes[0], 4)
+	if err != nil || len(metas) == 0 {
+		return nil, false
+	}
+	uuidEntries, err := extractLengthDelimitedField(metas[0], 1)
+	if err != nil || len(uuidEntries) == 0 {
+		return nil, false
+	}
+	uuidFields, err := extractLengthDelimitedField(uuidEntries[0], 1)
+	if err != nil || len(uuidFields) == 0 || len(uuidFields[0]) != 16 {
+		return nil, false
+	}
+	return append([]byte(nil), uuidFields[0]...), true
 }
 
 // printableRe matches printable runs of at least 2 characters.

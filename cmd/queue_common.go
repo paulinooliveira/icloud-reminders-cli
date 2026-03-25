@@ -8,18 +8,28 @@ import (
 	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/queue"
 	"icloud-reminders/internal/writer"
+	"icloud-reminders/pkg/models"
 )
 
 type queueReminderValidator interface {
 	GetReminder(appleID string) (*applebridge.Reminder, error)
 	UpdateReminder(appleID string, title, body *string, completed *bool) error
+	DeleteReminder(appleID string) error
+}
+
+type queueReconcileResult struct {
+	AppleID   string
+	CloudID   string
+	Children  map[string]queue.ChildStateItem
+	Created   bool
+	Rewritten bool
 }
 
 func canProceedWithoutQueueSync(stateItem queue.StateItem) bool {
-	if shouldProceedWithoutSync(stateItem.CloudID) {
-		return true
-	}
-	return strings.TrimSpace(stateItem.AppleID) != ""
+	// Queue upserts are allowed to proceed without a prior sync as long as we
+	// have a stable identifier (cloud id or apple id). This keeps the system
+	// responsive and avoids "sync gate" stalls when the sync path is flaky.
+	return strings.TrimSpace(stateItem.CloudID) != "" || strings.TrimSpace(stateItem.AppleID) != ""
 }
 
 func shouldQueryQueueValidatorList(stateItem queue.StateItem) bool {
@@ -108,15 +118,15 @@ func finalizeQueueSpec(state *queue.State, spec queue.Spec, now time.Time) (queu
 	return spec, preview
 }
 
-func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priorityLabel, listOverride string) (string, string, error) {
+func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priorityLabel, listOverride string) (queueReconcileResult, error) {
 	if !canProceedWithoutQueueSync(stateItem) {
 		if err := syncEngine.Sync(false); err != nil {
-			return "", "", err
+			return queueReconcileResult{}, err
 		}
 	}
 	bridge, cfg, err := loadOptionalValidatorBridge()
 	if err != nil {
-		return "", "", err
+		return queueReconcileResult{}, err
 	}
 	fallbackListID := ""
 	listName := "Sebastian"
@@ -132,9 +142,13 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 	}
 	if spec.Section != "" {
 		if _, err := w.EnsureSection(listID, spec.Section); err != nil {
-			return "", "", err
+			return queueReconcileResult{}, err
 		}
 	}
+
+	// Cloud-side title matches are the primary dedupe surface when the Mac bridge
+	// is missing or unavailable.
+	cloudMatches := findCloudExactTitleMatches(syncEngine.GetReminders(true), listID, spec.Title, true)
 
 	cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
 	var titleMatches []applebridge.Reminder
@@ -166,10 +180,16 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 
 	var cloudID string
 	var appleID string
+	createdNew := false
 	if choice.Keep != nil {
 		appleID = choice.Keep.AppleID
 		if cloud := cloudByUUID[strings.ToUpper(choice.Keep.UUID())]; cloud != nil {
 			cloudID = cloud.ID
+		}
+	}
+	if cloudID == "" {
+		if keep := chooseCanonicalCloudMatch(cloudMatches, stateItem.CloudID); keep != nil {
+			cloudID = keep.ID
 		}
 	}
 	if cloudID == "" && stateItem.CloudID != "" {
@@ -180,15 +200,22 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 			cloudID = candidate
 		}
 	}
+	if cloudID != "" {
+		// Delete any extra cloud-side duplicates for this title inside the list.
+		if err := deleteCloudTitleDuplicates(cloudMatches, cloudID); err != nil {
+			return queueReconcileResult{}, err
+		}
+	}
 	if cloudID == "" {
 		res, err := w.AddReminder(spec.Title, listID, deref(spec.Due), priorityLabel, deref(spec.Notes), "")
 		if err != nil {
-			return "", "", err
+			return queueReconcileResult{}, err
 		}
 		if errMsg, ok := res["error"].(string); ok && errMsg != "" {
-			return "", "", fmt.Errorf("%s", errMsg)
+			return queueReconcileResult{}, fmt.Errorf("%s", errMsg)
 		}
 		cloudID, _ = res["id"].(string)
+		createdNew = cloudID != ""
 	}
 
 	if cloudID == "" {
@@ -196,60 +223,114 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 			cloudID = candidate
 		}
 	}
-	if cloudID != "" && (spec.Notes != nil || stateItem.Title != spec.Title) {
-		changes := writer.ReminderChanges{Title: &spec.Title}
-		if spec.Notes != nil {
-			changes.Notes = spec.Notes
-		}
-		if _, err := w.EditReminder(cloudID, changes); err != nil {
-			return "", "", err
-		}
-	}
 	if cloudID != "" {
+		textNeedsRewrite := !createdNew && (spec.Notes != nil || stateItem.Title != spec.Title)
+		rewritten := false
+		children := stateItem.Children
+		if textNeedsRewrite {
+			// Never mutate title/notes in place: Apple’s CRDT merge can duplicate/corrupt.
+			// Instead: recreate (create-new + delete-old) and hard-dedupe residuals.
+			if err := syncEngine.Sync(false); err != nil && !shouldProceedWithoutSync(cloudID) {
+				return queueReconcileResult{}, err
+			}
+			oldCloudID := cloudID
+			newAppleID, newCloudID, newChildren, err := recreateQueueReminderTree(oldCloudID, listID, spec, priorityLabel, children)
+			if err != nil {
+				return queueReconcileResult{}, err
+			}
+			appleID = newAppleID
+			cloudID = newCloudID
+			children = newChildren
+			createdNew = true
+			rewritten = true
+
+			// Extra safety: delete any residual visible duplicates, including common CRDT-corruption
+			// variants (e.g. repeated titles).
+			_ = syncEngine.Sync(false)
+			if err := deleteCloudResidualTitleVariants(listID, spec.Title, cloudID); err != nil {
+				return queueReconcileResult{}, err
+			}
+		}
+
+		changes := writer.ReminderChanges{}
+		needsEdit := false
+		if !createdNew && spec.Due != nil {
+			if stateItem.Due == nil || *stateItem.Due != *spec.Due {
+				changes.DueDate = spec.Due
+				needsEdit = true
+			}
+		}
+		if spec.Flagged != nil {
+			if !createdNew || *spec.Flagged {
+				changes.Flagged = spec.Flagged
+				needsEdit = true
+			}
+		}
+		if spec.Priority != 0 || priorityLabel == "none" {
+			if !createdNew || stateItem.Priority != spec.Priority {
+				p := spec.Priority
+				changes.Priority = &p
+				needsEdit = true
+			}
+		}
+		if needsEdit {
+			if _, err := w.EditReminder(cloudID, changes); err != nil {
+				return queueReconcileResult{}, err
+			}
+		}
 		if len(spec.Tags) > 0 {
 			if _, err := w.SetReminderTags(cloudID, spec.Tags); err != nil {
-				return "", "", err
+				return queueReconcileResult{}, err
 			}
 		}
 		if spec.Section != "" {
 			if _, err := w.AssignReminderToSection(cloudID, listID, spec.Section); err != nil {
-				return "", "", err
-			}
-		}
-		changes := writer.ReminderChanges{}
-		if spec.Due != nil {
-			changes.DueDate = spec.Due
-		}
-		if spec.Flagged != nil {
-			changes.Flagged = spec.Flagged
-		}
-		if spec.Priority != 0 || priorityLabel == "none" {
-			p := spec.Priority
-			changes.Priority = &p
-		}
-		if changes.DueDate != nil || changes.Flagged != nil || changes.Priority != nil {
-			if _, err := w.EditReminder(cloudID, changes); err != nil {
-				return "", "", err
+				return queueReconcileResult{}, err
 			}
 		}
 		if appleID == "" {
 			appleID = "x-apple-reminder://" + shortReminderID(cloudID)
 		}
+		var validator queueReminderValidator
+		if bridge != nil {
+			validator = bridge
+		}
+		return finalizeQueueReconcileResult(queueReconcileResult{
+			AppleID:   appleID,
+			CloudID:   cloudID,
+			Children:  children,
+			Created:   createdNew,
+			Rewritten: rewritten,
+		}, validator, spec.Title, spec.Notes, listID)
 	}
+	var validator queueReminderValidator
+	if bridge != nil {
+		validator = bridge
+	}
+	return finalizeQueueReconcileResult(queueReconcileResult{
+		AppleID:   appleID,
+		CloudID:   cloudID,
+		Children:  stateItem.Children,
+		Created:   createdNew,
+		Rewritten: false,
+	}, validator, spec.Title, spec.Notes, listID)
+}
 
-	if bridge != nil && appleID != "" {
-		if err := repairQueueReminderValidatorText(bridge, appleID, spec.Title, spec.Notes); err != nil {
-			return "", "", err
+func finalizeQueueReconcileResult(res queueReconcileResult, bridge queueReminderValidator, title string, notes *string, listID string) (queueReconcileResult, error) {
+	if bridge != nil && strings.TrimSpace(res.AppleID) != "" {
+		if err := verifyQueueReminderValidatorText(bridge, res.AppleID, title, notes); err != nil {
+			// Validator mismatches are treated as projection lag; the queue state remains canonical.
+			// Surface the error upstream so callers can decide if/when to retry/repair.
+			return res, err
 		}
 	}
 	if err := cleanupQueueEmptySections(listID); err != nil {
-		return "", "", err
+		return res, err
 	}
-
-	return appleID, cloudID, nil
+	return res, nil
 }
 
-func repairQueueReminderValidatorText(bridge queueReminderValidator, appleID, title string, notes *string) error {
+func verifyQueueReminderValidatorText(bridge queueReminderValidator, appleID, title string, notes *string) error {
 	if bridge == nil || strings.TrimSpace(appleID) == "" {
 		return nil
 	}
@@ -260,36 +341,250 @@ func repairQueueReminderValidatorText(bridge queueReminderValidator, appleID, ti
 	if live == nil {
 		return fmt.Errorf("validator returned no reminder for %s", appleID)
 	}
-
-	var titlePtr *string
 	if live.Title != title {
-		titleCopy := title
-		titlePtr = &titleCopy
+		return fmt.Errorf("validator mismatch for %s: title mismatch", appleID)
 	}
-	var notesPtr *string
 	if notes != nil && live.Body != *notes {
-		notesCopy := *notes
-		notesPtr = &notesCopy
+		return fmt.Errorf("validator mismatch for %s: notes mismatch", appleID)
 	}
-	if titlePtr == nil && notesPtr == nil {
+	return nil
+}
+
+func recreateQueueReminderTree(oldCloudID, listID string, spec queue.Spec, priorityLabel string, children map[string]queue.ChildStateItem) (string, string, map[string]queue.ChildStateItem, error) {
+	res, err := w.AddReminder(spec.Title, listID, deref(spec.Due), priorityLabel, deref(spec.Notes), "")
+	if err != nil {
+		return "", "", nil, err
+	}
+	if errMsg, ok := res["error"].(string); ok && errMsg != "" {
+		return "", "", nil, fmt.Errorf("%s", errMsg)
+	}
+	newCloudID, _ := res["id"].(string)
+	if strings.TrimSpace(newCloudID) == "" {
+		return "", "", nil, fmt.Errorf("queue reminder recreate did not return a new reminder id")
+	}
+	newAppleID := "x-apple-reminder://" + shortReminderID(newCloudID)
+
+	if spec.Flagged != nil && *spec.Flagged {
+		if _, err := w.EditReminder(newCloudID, writer.ReminderChanges{Flagged: spec.Flagged}); err != nil {
+			return "", "", nil, err
+		}
+	}
+
+	newChildren := map[string]queue.ChildStateItem{}
+	if len(children) > 0 {
+		for childKey, child := range children {
+			title := strings.TrimSpace(child.Title)
+			if title == "" {
+				continue
+			}
+			childRes, err := w.AddReminder(title, listID, deref(child.Due), priorityLabelFromValue(child.Priority), "", newCloudID)
+			if err != nil {
+				return "", "", nil, err
+			}
+			if errMsg, ok := childRes["error"].(string); ok && errMsg != "" {
+				return "", "", nil, fmt.Errorf("%s", errMsg)
+			}
+			childCloudID, _ := childRes["id"].(string)
+			if strings.TrimSpace(childCloudID) == "" {
+				return "", "", nil, fmt.Errorf("queue reminder recreate child did not return a new reminder id")
+			}
+			if child.Flagged {
+				flagged := true
+				if _, err := w.EditReminder(childCloudID, writer.ReminderChanges{Flagged: &flagged}); err != nil {
+					return "", "", nil, err
+				}
+			}
+			child.AppleID = "x-apple-reminder://" + shortReminderID(childCloudID)
+			child.CloudID = childCloudID
+			newChildren[childKey] = child
+		}
+	}
+
+	// Resolve and delete the old parent reminder last, after the new subtree exists.
+	if strings.TrimSpace(oldCloudID) != "" {
+		if err := deleteCloudChildrenForParent(oldCloudID); err != nil {
+			return "", "", nil, err
+		}
+		if err := deleteCloudIDIfPresent(oldCloudID); err != nil {
+			return "", "", nil, err
+		}
+	}
+	return newAppleID, newCloudID, newChildren, nil
+}
+
+func deleteCloudChildrenForParent(parentIDHint string) error {
+	if strings.TrimSpace(parentIDHint) == "" {
 		return nil
 	}
-	if err := bridge.UpdateReminder(appleID, titlePtr, notesPtr, nil); err != nil {
-		return err
+	parentID := syncEngine.FindReminderByID(shortReminderID(parentIDHint))
+	if parentID == "" {
+		parentID = parentIDHint
 	}
+	for _, r := range syncEngine.GetReminders(true) {
+		if r == nil || r.ParentRef == nil || strings.TrimSpace(*r.ParentRef) == "" {
+			continue
+		}
+		if !sameReminderID(*r.ParentRef, parentID) {
+			continue
+		}
+		if err := deleteCloudRecordStrict(r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	verified, err := bridge.GetReminder(appleID)
+func deleteCloudIDIfPresent(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	candidate := syncEngine.FindReminderByID(shortReminderID(id))
+	if candidate == "" {
+		candidate = id
+	}
+	result, err := w.DeleteReminder(candidate)
 	if err != nil {
 		return err
 	}
-	if verified == nil {
-		return fmt.Errorf("validator returned no reminder after repair for %s", appleID)
-	}
-	if titlePtr != nil && verified.Title != title {
-		return fmt.Errorf("validator repair failed for %s: title mismatch", appleID)
-	}
-	if notesPtr != nil && verified.Body != *notes {
-		return fmt.Errorf("validator repair failed for %s: notes mismatch", appleID)
+	if errMsg, ok := result["error"].(string); ok && errMsg != "" {
+		return fmt.Errorf("%s", errMsg)
 	}
 	return nil
+}
+
+func deleteCloudRecordStrict(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := w.DeleteReminder(id)
+		if err != nil {
+			return err
+		}
+		if v, ok := result["error"]; ok {
+			msg := fmt.Sprintf("%v", v)
+			lastErr = fmt.Errorf("%s", msg)
+			// CloudKit can transiently refuse deletes while records are locked/settling.
+			if strings.Contains(msg, "OP_LOCK_FAILURE") || strings.Contains(strings.ToLower(msg), "oplock") {
+				_ = syncEngine.Sync(false)
+				time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
+				continue
+			}
+			return lastErr
+		}
+		if missing, ok := result["missing"].(bool); ok && missing {
+			return fmt.Errorf("delete reported missing for live id %s", id)
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("delete failed for %s", id)
+}
+
+func deleteCloudResidualTitleVariants(listID, expectedTitle, keepCloudID string) error {
+	if err := syncEngine.Sync(false); err != nil {
+		return err
+	}
+	expected := strings.TrimSpace(expectedTitle)
+	if expected == "" {
+		return nil
+	}
+	for _, r := range syncEngine.GetReminders(true) {
+		if r == nil || r.Completed {
+			continue
+		}
+		if listID != "" && (r.ListRef == nil || *r.ListRef != listID) {
+			continue
+		}
+		if r.ParentRef != nil && strings.TrimSpace(*r.ParentRef) != "" {
+			continue
+		}
+		if sameReminderID(r.ID, keepCloudID) {
+			continue
+		}
+		title := strings.TrimSpace(r.Title)
+		if title == expected || isRepeatedTitleVariant(title, expected) {
+			if err := deleteCloudRecordStrict(r.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isRepeatedTitleVariant(title, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	for n := 2; n <= 4; n++ {
+		if title == strings.Repeat(expected, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func findCloudExactTitleMatches(reminders []*models.Reminder, listID, title string, topLevelOnly bool) []*models.Reminder {
+	out := make([]*models.Reminder, 0)
+	for _, r := range reminders {
+		if r == nil || r.Completed || r.Title != title {
+			continue
+		}
+		if listID != "" && (r.ListRef == nil || *r.ListRef != listID) {
+			continue
+		}
+		if topLevelOnly && r.ParentRef != nil && strings.TrimSpace(*r.ParentRef) != "" {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func chooseCanonicalCloudMatch(matches []*models.Reminder, preferredCloudID string) *models.Reminder {
+	for _, r := range matches {
+		if r == nil {
+			continue
+		}
+		if preferredCloudID != "" && sameReminderID(r.ID, preferredCloudID) {
+			return r
+		}
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	best := matches[0]
+	bestTS := int64(0)
+	if best != nil && best.ModifiedTS != nil {
+		bestTS = *best.ModifiedTS
+	}
+	for _, r := range matches[1:] {
+		if r == nil || r.ModifiedTS == nil {
+			continue
+		}
+		if *r.ModifiedTS > bestTS {
+			best = r
+			bestTS = *r.ModifiedTS
+		}
+	}
+	return best
+}
+
+func deleteCloudTitleDuplicates(matches []*models.Reminder, keepCloudID string) error {
+	for _, r := range matches {
+		if r == nil || r.ID == "" || sameReminderID(r.ID, keepCloudID) {
+			continue
+		}
+		if err := deleteCloudRecordStrict(r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameReminderID(a, b string) bool {
+	return strings.EqualFold(shortReminderID(a), shortReminderID(b))
 }

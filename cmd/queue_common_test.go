@@ -5,6 +5,7 @@ import (
 
 	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/queue"
+	"icloud-reminders/pkg/models"
 )
 
 type fakeQueueValidator struct {
@@ -36,40 +37,37 @@ func (f *fakeQueueValidator) UpdateReminder(appleID string, title, body *string,
 	return nil
 }
 
-func TestRepairQueueReminderValidatorTextNoopsWhenAlreadyMatched(t *testing.T) {
+func (f *fakeQueueValidator) DeleteReminder(appleID string) error {
+	return nil
+}
+
+func TestVerifyQueueReminderValidatorTextNoopsWhenAlreadyMatched(t *testing.T) {
 	bridge := &fakeQueueValidator{
 		gets: []*applebridge.Reminder{
 			{AppleID: "x-apple-reminder://ABC", Title: "Morning", Body: "clean body"},
 		},
 	}
 	notes := "clean body"
-	if err := repairQueueReminderValidatorText(bridge, "x-apple-reminder://ABC", "Morning", &notes); err != nil {
-		t.Fatalf("repairQueueReminderValidatorText: %v", err)
+	if err := verifyQueueReminderValidatorText(bridge, "x-apple-reminder://ABC", "Morning", &notes); err != nil {
+		t.Fatalf("verifyQueueReminderValidatorText: %v", err)
 	}
 	if len(bridge.updates) != 0 {
 		t.Fatalf("expected no validator update, got %#v", bridge.updates)
 	}
 }
 
-func TestRepairQueueReminderValidatorTextRepairsMismatch(t *testing.T) {
+func TestVerifyQueueReminderValidatorTextDetectsMismatch(t *testing.T) {
 	bridge := &fakeQueueValidator{
 		gets: []*applebridge.Reminder{
 			{AppleID: "x-apple-reminder://ABC", Title: "MorningMorning", Body: "bad bodybad body"},
-			{AppleID: "x-apple-reminder://ABC", Title: "Morning", Body: "clean body"},
 		},
 	}
 	notes := "clean body"
-	if err := repairQueueReminderValidatorText(bridge, "x-apple-reminder://ABC", "Morning", &notes); err != nil {
-		t.Fatalf("repairQueueReminderValidatorText: %v", err)
+	if err := verifyQueueReminderValidatorText(bridge, "x-apple-reminder://ABC", "Morning", &notes); err == nil {
+		t.Fatalf("expected mismatch error, got nil")
 	}
-	if len(bridge.updates) != 1 {
-		t.Fatalf("expected one validator update, got %#v", bridge.updates)
-	}
-	if bridge.updates[0].title == nil || *bridge.updates[0].title != "Morning" {
-		t.Fatalf("unexpected title repair payload: %#v", bridge.updates[0].title)
-	}
-	if bridge.updates[0].body == nil || *bridge.updates[0].body != "clean body" {
-		t.Fatalf("unexpected body repair payload: %#v", bridge.updates[0].body)
+	if len(bridge.updates) != 0 {
+		t.Fatalf("expected no validator update, got %#v", bridge.updates)
 	}
 }
 
@@ -97,5 +95,27 @@ func TestCanProceedWithoutQueueSync(t *testing.T) {
 	}
 	if !canProceedWithoutQueueSync(queue.StateItem{AppleID: "x-apple-reminder://ABC"}) {
 		t.Fatalf("expected known apple id to skip sync gate")
+	}
+}
+
+func TestChooseCanonicalCloudMatchPrefersPreferredID(t *testing.T) {
+	a := &models.Reminder{ID: "Reminder/A", Title: "X"}
+	b := &models.Reminder{ID: "Reminder/B", Title: "X"}
+	matches := []*models.Reminder{a, b}
+	keep := chooseCanonicalCloudMatch(matches, "Reminder/B")
+	if keep == nil || keep.ID != "Reminder/B" {
+		t.Fatalf("expected preferred cloud id to win, got %#v", keep)
+	}
+}
+
+func TestChooseCanonicalCloudMatchPicksNewestModifiedTS(t *testing.T) {
+	ts1 := int64(100)
+	ts2 := int64(200)
+	a := &models.Reminder{ID: "Reminder/A", Title: "X", ModifiedTS: &ts1}
+	b := &models.Reminder{ID: "Reminder/B", Title: "X", ModifiedTS: &ts2}
+	matches := []*models.Reminder{a, b}
+	keep := chooseCanonicalCloudMatch(matches, "")
+	if keep == nil || keep.ID != "Reminder/B" {
+		t.Fatalf("expected newest modified to win, got %#v", keep)
 	}
 }

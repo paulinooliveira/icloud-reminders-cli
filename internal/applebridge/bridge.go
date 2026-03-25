@@ -89,7 +89,8 @@ func (b *Bridge) ActiveReminderUUIDsFromStore(listID string) ([]string, error) {
 	out, err := b.runRemotePython(fmt.Sprintf(`
 import glob, json, sqlite3
 list_id = %s
-paths = sorted(glob.glob("/Users/%s/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"))
+username = %s
+paths = sorted(glob.glob(f"/Users/{username}/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"))
 active = set()
 for path in paths:
     con = sqlite3.connect(path)
@@ -123,7 +124,8 @@ func (b *Bridge) CleanupEmptySectionsInStore(listID string) ([]string, error) {
 	out, err := b.runRemotePython(fmt.Sprintf(`
 import glob, gzip, hashlib, json, sqlite3
 list_id = %s
-paths = sorted(glob.glob("/Users/%s/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"))
+username = %s
+paths = sorted(glob.glob(f"/Users/{username}/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"))
 deleted = set()
 for path in paths:
     con = sqlite3.connect(path)
@@ -241,7 +243,22 @@ func IsNotFoundError(err error) bool {
 }
 
 func (b *Bridge) UpdateReminder(appleID string, title, body *string, completed *bool) error {
-	script := buildUpdateReminderAppleScript(appleID, title, body, completed)
+	uuid := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(appleID, "x-apple-reminder://")))
+	if uuid == "" {
+		return fmt.Errorf("apple bridge update: empty reminder id")
+	}
+
+	if title != nil || body != nil {
+		if err := b.updateReminderTextInStore(uuid, title, body); err != nil {
+			return err
+		}
+	}
+
+	if completed == nil {
+		return nil
+	}
+
+	script := buildUpdateReminderAppleScript(appleID, nil, nil, completed)
 	if strings.TrimSpace(script) == "" {
 		return nil
 	}
@@ -249,19 +266,71 @@ func (b *Bridge) UpdateReminder(appleID string, title, body *string, completed *
 	return err
 }
 
+func (b *Bridge) updateReminderTextInStore(reminderUUID string, title, body *string) error {
+	script := buildStoreUpdatePythonScript(reminderUUID, title, body, b.cfg.User)
+	out, err := b.runRemotePython(script)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "0" {
+		return fmt.Errorf("apple bridge store update: reminder %s not found", reminderUUID)
+	}
+	return nil
+}
+
+func buildStoreUpdatePythonScript(reminderUUID string, title, body *string, username string) string {
+	assignments := make([]string, 0, 2)
+	if title != nil {
+		assignments = append(assignments, `ZTITLE = ?`)
+	}
+	if body != nil {
+		assignments = append(assignments, `ZNOTES = ?`)
+	}
+
+	args := make([]string, 0, 2)
+	if title != nil {
+		args = append(args, pyString(*title))
+	}
+	if body != nil {
+		args = append(args, pyString(*body))
+	}
+
+	return fmt.Sprintf(`
+import glob, sqlite3, sys
+reminder_uuid = %s
+username = %s
+paths = sorted(glob.glob(f"/Users/{username}/Library/Group Containers/group.com.apple.reminders/Container_v1/Stores/Data-*.sqlite"))
+updated = 0
+for path in paths:
+    if path.endswith("Data-local.sqlite"):
+        continue
+    con = sqlite3.connect(path)
+    row = con.execute(
+        """
+        select Z_PK
+        from ZREMCDREMINDER
+        where ZCKIDENTIFIER = ?
+          and ifnull(ZMARKEDFORDELETION, 0) = 0
+        """,
+        (reminder_uuid,),
+    ).fetchone()
+    if not row:
+        continue
+    params = [%s]
+    params.append(row[0])
+    con.execute(
+        "update ZREMCDREMINDER set %s where Z_PK = ?",
+        tuple(params),
+    )
+    con.commit()
+    updated += con.total_changes
+sys.stdout.write(str(updated))
+`, pyString(reminderUUID), pyString(username), strings.Join(args, ", "), strings.Join(assignments, ", "))
+}
+
 func buildUpdateReminderAppleScript(appleID string, title, body *string, completed *bool) string {
 	var statements []string
 	statements = append(statements, fmt.Sprintf("set r to reminder id %s", appleScriptString(appleID)))
-	if title != nil {
-		// Clearing first avoids local Reminders cache concatenation on CRDT-backed fields.
-		statements = append(statements, `set name of r to ""`)
-		statements = append(statements, fmt.Sprintf("set name of r to %s", appleScriptString(*title)))
-	}
-	if body != nil {
-		// Clearing first avoids local Reminders cache concatenation on CRDT-backed fields.
-		statements = append(statements, `set body of r to ""`)
-		statements = append(statements, fmt.Sprintf("set body of r to %s", appleScriptString(*body)))
-	}
 	if completed != nil {
 		if *completed {
 			statements = append(statements, "set completed of r to true")

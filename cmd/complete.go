@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -16,10 +17,7 @@ var completeCmd = &cobra.Command{
 			ReminderID string `json:"reminder_id"`
 		}{ReminderID: reminderID}
 		if err := executeMutation("complete", "reminder", reminderID, payload, true, func() (mutationOutcome, error) {
-			if err := syncEngine.Sync(false); err != nil {
-				return mutationOutcome{}, err
-			}
-			result, err := w.CompleteReminder(reminderID)
+			result, err := completeReminderWithFallback(reminderID)
 			if err != nil {
 				return mutationOutcome{}, err
 			}
@@ -41,4 +39,19 @@ var completeCmd = &cobra.Command{
 		fmt.Printf("✅ Completed: %s\n", args[0])
 		return nil
 	},
+}
+
+func completeReminderWithFallback(reminderID string) (map[string]interface{}, error) {
+	result, err := w.CompleteReminder(reminderID)
+	if err == nil {
+		return result, nil
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "not found") && !strings.Contains(msg, "missing change tag") {
+		return nil, err
+	}
+	if syncErr := syncEngine.Sync(false); syncErr != nil {
+		return nil, err
+	}
+	return w.CompleteReminder(reminderID)
 }

@@ -7,16 +7,36 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"icloud-reminders/internal/logger"
 )
 
-// ConfigDir is the default config/session directory.
-var ConfigDir = filepath.Join(os.Getenv("HOME"), ".config", "icloud-reminders")
+const configDirEnv = "ICLOUD_REMINDERS_CONFIG_DIR"
 
-// CacheFile is the path to the reminders JSON cache file.
-var CacheFile = filepath.Join(ConfigDir, "ck_cache.json")
+// ConfigDir returns the config/session directory.
+func ConfigDir() string {
+	if override := strings.TrimSpace(os.Getenv(configDirEnv)); override != "" {
+		return override
+	}
+	if isTestProcess() {
+		return filepath.Join(os.TempDir(), "icloud-reminders-test", filepath.Base(os.Args[0]))
+	}
+	return filepath.Join(os.Getenv("HOME"), ".config", "icloud-reminders")
+}
 
-// SessionFile is the path to the auth session JSON file.
-var SessionFile = filepath.Join(ConfigDir, "session.json")
+// CacheFile returns the path to the reminders JSON cache file.
+func CacheFile() string {
+	return filepath.Join(ConfigDir(), "ck_cache.json")
+}
+
+// SessionFile returns the path to the auth session JSON file.
+func SessionFile() string {
+	return filepath.Join(ConfigDir(), "session.json")
+}
+
+func isTestProcess() bool {
+	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
+}
 
 // ReminderData holds raw cached data for a single reminder.
 type ReminderData struct {
@@ -72,12 +92,26 @@ func NewCache() *Cache {
 
 // Load loads the cache from disk; returns empty cache on error.
 func Load() *Cache {
-	data, err := os.ReadFile(CacheFile)
+	cacheFile := CacheFile()
+	data, err := os.ReadFile(cacheFile)
 	if err != nil {
+		// Only a missing file is expected; other read errors should be visible.
+		if !os.IsNotExist(err) {
+			logger.Warnf("cache read failed (%s): %v", cacheFile, err)
+		}
 		return NewCache()
 	}
 	var c Cache
 	if err := json.Unmarshal(data, &c); err != nil {
+		// Quarantine corrupted cache so the failure can't silently masquerade as
+		// an empty state.
+		ts := time.Now().Format("20060102T150405")
+		quarantine := cacheFile + ".corrupt." + ts
+		if renameErr := os.Rename(cacheFile, quarantine); renameErr != nil {
+			logger.Warnf("cache json decode failed (%s): %v (also failed to quarantine: %v)", cacheFile, err, renameErr)
+		} else {
+			logger.Warnf("cache json decode failed (%s): %v (moved to %s)", cacheFile, err, quarantine)
+		}
 		return NewCache()
 	}
 	if c.Reminders == nil {
@@ -97,7 +131,7 @@ func Load() *Cache {
 
 // Save writes the cache to disk.
 func (c *Cache) Save() error {
-	if err := os.MkdirAll(ConfigDir, 0700); err != nil {
+	if err := os.MkdirAll(ConfigDir(), 0700); err != nil {
 		return err
 	}
 	now := time.Now().Format("2006-01-02T15:04:05")
@@ -106,7 +140,7 @@ func (c *Cache) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(CacheFile, data, 0600)
+	return os.WriteFile(CacheFile(), data, 0600)
 }
 
 // ReminderAliases returns the reminder cache keys that may refer to the same
