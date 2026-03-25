@@ -26,6 +26,14 @@ func shouldQueryQueueValidatorList(stateItem queue.StateItem) bool {
 	return strings.TrimSpace(stateItem.AppleID) == "" && strings.TrimSpace(stateItem.CloudID) == ""
 }
 
+func cleanupQueueEmptySections(listID string) error {
+	if strings.TrimSpace(listID) == "" {
+		return nil
+	}
+	_, err := w.SweepEmptySections(listID)
+	return err
+}
+
 func queueLocation() *time.Location {
 	loc, err := time.LoadLocation("America/Sao_Paulo")
 	if err != nil {
@@ -233,6 +241,9 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 		if err := repairQueueReminderValidatorText(bridge, appleID, spec.Title, spec.Notes); err != nil {
 			return "", "", err
 		}
+	}
+	if err := cleanupQueueEmptySections(listID); err != nil {
+		return "", "", err
 	}
 
 	return appleID, cloudID, nil

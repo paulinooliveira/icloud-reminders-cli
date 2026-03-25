@@ -81,6 +81,50 @@ func TestGetReminderParsesJSON(t *testing.T) {
 	}
 }
 
+func TestActiveReminderUUIDsFromStoreParsesJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshPath := filepath.Join(tmpDir, "ssh")
+	script := "#!/bin/sh\nprintf '%s' '[\"ABC\",\"DEF\"]'\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+
+	oldSSH := sshBinary
+	sshBinary = sshPath
+	defer func() { sshBinary = oldSSH }()
+
+	bridge := New(&Config{Host: "example-host", User: "tester", IdentityPath: "/tmp/key"})
+	ids, err := bridge.ActiveReminderUUIDsFromStore("LIST-ID")
+	if err != nil {
+		t.Fatalf("ActiveReminderUUIDsFromStore error: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "ABC" || ids[1] != "DEF" {
+		t.Fatalf("unexpected ids: %#v", ids)
+	}
+}
+
+func TestCleanupEmptySectionsInStoreParsesJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshPath := filepath.Join(tmpDir, "ssh")
+	script := "#!/bin/sh\nprintf '%s' '[\"Finance Systems\",\"People Admin\"]'\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+
+	oldSSH := sshBinary
+	sshBinary = sshPath
+	defer func() { sshBinary = oldSSH }()
+
+	bridge := New(&Config{Host: "example-host", User: "tester", IdentityPath: "/tmp/key"})
+	sections, err := bridge.CleanupEmptySectionsInStore("LIST-ID")
+	if err != nil {
+		t.Fatalf("CleanupEmptySectionsInStore error: %v", err)
+	}
+	if len(sections) != 2 || sections[0] != "Finance Systems" || sections[1] != "People Admin" {
+		t.Fatalf("unexpected sections: %#v", sections)
+	}
+}
+
 func TestBuildUpdateReminderAppleScriptClearsTextBeforeSetting(t *testing.T) {
 	title := "Morning"
 	body := "0 / 1h, 0 / 10k tk."

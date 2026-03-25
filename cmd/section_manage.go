@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -12,6 +13,7 @@ var (
 	renameSectionName string
 	deleteSectionList string
 	deleteSectionForce bool
+	cleanupSectionList string
 )
 
 var ensureSectionCmd = &cobra.Command{
@@ -94,6 +96,35 @@ var deleteSectionCmd = &cobra.Command{
 	},
 }
 
+var cleanupEmptySectionsCmd = &cobra.Command{
+	Use:   "cleanup-empty-sections",
+	Short: "Delete all empty sections from a list",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if cleanupSectionList == "" {
+			return fmt.Errorf("--list is required")
+		}
+		if !canProceedWithoutSectionSync(cleanupSectionList) {
+			if err := bestEffortSync(); err != nil {
+				return err
+			}
+		}
+		deleted, err := w.SweepEmptySections(cleanupSectionList)
+		if err != nil {
+			return err
+		}
+		if len(deleted) == 0 {
+			fmt.Println("✅ No empty sections to clean.")
+			return nil
+		}
+		fmt.Printf("✅ Deleted empty sections: %s\n", strings.Join(deleted, ", "))
+		return nil
+	},
+}
+
+func canProceedWithoutSectionSync(listHint string) bool {
+	return strings.HasPrefix(listHint, "List/") || looksLikeReminderUUID(listHint)
+}
+
 func init() {
 	ensureSectionCmd.Flags().StringVarP(&ensureSectionList, "list", "l", "", "List name or ID")
 
@@ -102,4 +133,6 @@ func init() {
 
 	deleteSectionCmd.Flags().StringVarP(&deleteSectionList, "list", "l", "", "List name or ID")
 	deleteSectionCmd.Flags().BoolVar(&deleteSectionForce, "force", false, "Clear memberships before deleting the section")
+
+	cleanupEmptySectionsCmd.Flags().StringVarP(&cleanupSectionList, "list", "l", "", "List name or ID")
 }

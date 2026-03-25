@@ -72,6 +72,7 @@ func init() {
 		ensureSectionCmd,
 		renameSectionCmd,
 		deleteSectionCmd,
+		cleanupEmptySectionsCmd,
 		setSectionCmd,
 		setTagsCmd,
 		searchCmd,

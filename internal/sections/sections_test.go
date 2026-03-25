@@ -145,6 +145,20 @@ func TestRemoveSection(t *testing.T) {
 	}
 }
 
+func TestUniqueGroupIDs(t *testing.T) {
+	mf := &MembershipFile{
+		Memberships: []Membership{
+			{GroupID: "b", MemberID: "r1"},
+			{GroupID: "a", MemberID: "r2"},
+			{GroupID: "b", MemberID: "r3"},
+			{GroupID: "", MemberID: "r4"},
+		},
+	}
+	if got := UniqueGroupIDs(mf); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("UniqueGroupIDs mismatch: %#v", got)
+	}
+}
+
 func TestCanonicalName(t *testing.T) {
 	tests := map[string]string{
 		"DK":                "dk",

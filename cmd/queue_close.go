@@ -21,9 +21,6 @@ var queueCompleteCmd = &cobra.Command{
 				Key string `json:"key"`
 			}{Key: key}
 			if err := executeMutation("queue-complete", "queue", key, payload, false, func() (mutationOutcome, error) {
-				if err := syncEngine.Sync(false); err != nil {
-					return mutationOutcome{}, err
-				}
 				bridge, cfg, err := loadOptionalValidatorBridge()
 				if err != nil {
 					return mutationOutcome{}, err
@@ -51,7 +48,8 @@ var queueCompleteCmd = &cobra.Command{
 				}
 				cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
 				var choice queue.CanonicalChoice
-				if bridge != nil {
+				cloudID := item.CloudID
+				if cloudID == "" && bridge != nil {
 					listName := "Sebastian"
 					if cfg != nil && cfg.SebastianListName != "" {
 						listName = cfg.SebastianListName
@@ -68,7 +66,6 @@ var queueCompleteCmd = &cobra.Command{
 						}
 					}
 				}
-				cloudID := item.CloudID
 				if cloudID == "" && choice.Keep != nil {
 					if cloud := cloudByUUID[strings.ToUpper(choice.Keep.UUID())]; cloud != nil {
 						cloudID = cloud.ID
@@ -78,7 +75,7 @@ var queueCompleteCmd = &cobra.Command{
 					cloudID = syncEngine.FindReminderByTitle(item.Title, listID, false)
 				}
 				if cloudID != "" {
-					result, err := w.CompleteReminder(cloudID)
+					result, err := completeReminderWithFallback(cloudID)
 					if err != nil {
 						return mutationOutcome{}, err
 					}
@@ -102,6 +99,9 @@ var queueCompleteCmd = &cobra.Command{
 				if err := state.Save(); err != nil {
 					return mutationOutcome{}, err
 				}
+				if err := cleanupQueueEmptySections(listID); err != nil {
+					return mutationOutcome{}, err
+				}
 				return mutationOutcome{DeleteProjection: true}, nil
 			}); err != nil {
 				return err
@@ -123,9 +123,6 @@ var queueDeleteCmd = &cobra.Command{
 				Key string `json:"key"`
 			}{Key: key}
 			if err := executeMutation("queue-delete", "queue", key, payload, false, func() (mutationOutcome, error) {
-				if err := bestEffortSync(); err != nil {
-					return mutationOutcome{}, err
-				}
 				bridge, cfg, err := loadOptionalValidatorBridge()
 				if err != nil {
 					return mutationOutcome{}, err
@@ -153,11 +150,12 @@ var queueDeleteCmd = &cobra.Command{
 				}
 				cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
 				var choice queue.CanonicalChoice
+				cloudID := item.CloudID
 				listName := "Sebastian"
 				if cfg != nil && cfg.SebastianListName != "" {
 					listName = cfg.SebastianListName
 				}
-				if bridge != nil {
+				if bridge != nil && cloudID == "" {
 					appItems, err := bridge.ListReminders(listName)
 					if err != nil {
 						return mutationOutcome{}, err
@@ -170,7 +168,6 @@ var queueDeleteCmd = &cobra.Command{
 						}
 					}
 				}
-				cloudID := item.CloudID
 				if cloudID == "" && choice.Keep != nil {
 					if cloud := cloudByUUID[strings.ToUpper(choice.Keep.UUID())]; cloud != nil {
 						cloudID = cloud.ID
@@ -200,6 +197,9 @@ var queueDeleteCmd = &cobra.Command{
 					}
 				}
 				if err := state.Save(); err != nil {
+					return mutationOutcome{}, err
+				}
+				if err := cleanupQueueEmptySections(listID); err != nil {
 					return mutationOutcome{}, err
 				}
 				return mutationOutcome{DeleteProjection: true}, nil

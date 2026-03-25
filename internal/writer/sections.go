@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"icloud-reminders/internal/applebridge"
 	"icloud-reminders/internal/cache"
 	"icloud-reminders/internal/cloudkit"
 	"icloud-reminders/internal/sections"
@@ -150,6 +152,197 @@ func (w *Writer) EnsureSection(listHint, name string) (map[string]interface{}, e
 	}, nil
 }
 
+type SectionInfo struct {
+	ID   string
+	Name string
+}
+
+func (w *Writer) SweepEmptySections(listHint string) ([]string, error) {
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return nil, err
+	}
+	listID, err := w.resolveListRef(listHint, "")
+	if err != nil {
+		return nil, err
+	}
+	listRecord, listFields, membershipFile, err := w.loadMembershipFile(ownerID, listID)
+	if err != nil {
+		return nil, err
+	}
+	sectionsForList, err := w.listSections(ownerID, listID)
+	if err != nil {
+		return nil, err
+	}
+	activeMemberIDs, err := w.activeSectionMemberIDs(ownerID, listID, resolveListName(listFields, listID), membershipFile)
+	if err != nil {
+		return nil, err
+	}
+	if pruneInactiveMemberships(membershipFile, activeMemberIDs) {
+		if err := w.persistMembershipFile(ownerID, listID, listRecord, listFields, membershipFile); err != nil {
+			return nil, err
+		}
+	}
+	deleted := make([]string, 0)
+	for _, section := range sectionsForList {
+		if section.ID == "" {
+			continue
+		}
+		if sections.HasMembers(membershipFile, section.ID) {
+			continue
+		}
+		if err := w.deleteSectionRecord(ownerID, listID, section.ID); err != nil {
+			return nil, err
+		}
+		if section.Name != "" {
+			deleted = append(deleted, section.Name)
+		} else {
+			deleted = append(deleted, section.ID)
+		}
+	}
+	if bridge := loadSectionValidatorBridge(); bridge != nil {
+		if localDeleted, err := bridge.CleanupEmptySectionsInStore(shortID(listID)); err == nil {
+			deleted = append(deleted, localDeleted...)
+		}
+	}
+	sort.Strings(deleted)
+	deleted = uniqueSortedStrings(deleted)
+	return deleted, nil
+}
+
+func (w *Writer) activeSectionMemberIDs(ownerID, listID, listName string, membershipFile *sections.MembershipFile) (map[string]struct{}, error) {
+	memberIDs := uniqueMembershipMemberIDs(membershipFile)
+	if len(memberIDs) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	if bridge := loadSectionValidatorBridge(); bridge != nil && strings.TrimSpace(listName) != "" {
+		if ids, err := bridge.ActiveReminderUUIDsFromStore(listID); err == nil {
+			active := make(map[string]struct{}, len(ids))
+			for _, id := range ids {
+				active[strings.ToUpper(strings.TrimSpace(id))] = struct{}{}
+			}
+			return active, nil
+		}
+		items, err := bridge.ListReminders(listName)
+		if err == nil {
+			active := make(map[string]struct{}, len(items))
+			for _, item := range items {
+				if item.Completed {
+					continue
+				}
+				active[strings.ToUpper(item.UUID())] = struct{}{}
+			}
+			return active, nil
+		}
+	}
+
+	recordNames := make([]string, 0, len(memberIDs)*2)
+	seenRecords := make(map[string]struct{}, len(memberIDs)*2)
+	for _, memberID := range memberIDs {
+		for _, candidate := range []string{memberID, sections.ReminderRecordName(memberID)} {
+			if _, ok := seenRecords[candidate]; ok {
+				continue
+			}
+			seenRecords[candidate] = struct{}{}
+			recordNames = append(recordNames, candidate)
+		}
+	}
+	records, err := w.CK.LookupRecords(ownerID, recordNames)
+	if err != nil {
+		return nil, err
+	}
+	active := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		if code, _ := record["serverErrorCode"].(string); code != "" {
+			continue
+		}
+		fields, _ := record["fields"].(map[string]interface{})
+		if getReferenceRecordName(fields, "List") != listID {
+			continue
+		}
+		if getFieldIntValue(fields, "Completed") != 0 {
+			continue
+		}
+		title := utils.ExtractTitle(getFieldStringValue(fields, "TitleDocument"))
+		if strings.TrimSpace(title) == "" {
+			continue
+		}
+		recordName, _ := record["recordName"].(string)
+		active[strings.ToUpper(shortID(recordName))] = struct{}{}
+	}
+	return active, nil
+}
+
+func loadSectionValidatorBridge() *applebridge.Bridge {
+	cfg := applebridge.LoadValidatorConfigFromEnv()
+	if cfg == nil {
+		return nil
+	}
+	return applebridge.New(cfg)
+}
+
+func uniqueMembershipMemberIDs(membershipFile *sections.MembershipFile) []string {
+	if membershipFile == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(membershipFile.Memberships))
+	out := make([]string, 0, len(membershipFile.Memberships))
+	for _, membership := range membershipFile.Memberships {
+		memberID := strings.ToUpper(strings.TrimSpace(membership.MemberID))
+		if memberID == "" {
+			continue
+		}
+		if _, ok := seen[memberID]; ok {
+			continue
+		}
+		seen[memberID] = struct{}{}
+		out = append(out, memberID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func pruneInactiveMemberships(membershipFile *sections.MembershipFile, activeMemberIDs map[string]struct{}) bool {
+	if membershipFile == nil || len(membershipFile.Memberships) == 0 {
+		return false
+	}
+	filtered := make([]sections.Membership, 0, len(membershipFile.Memberships))
+	changed := false
+	for _, membership := range membershipFile.Memberships {
+		memberID := strings.ToUpper(strings.TrimSpace(membership.MemberID))
+		if _, ok := activeMemberIDs[memberID]; !ok {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, membership)
+	}
+	if changed {
+		membershipFile.Memberships = filtered
+	}
+	return changed
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (w *Writer) RenameSection(listHint, sectionHint, newName string) (map[string]interface{}, error) {
 	if strings.TrimSpace(newName) == "" {
 		return errResult(fmt.Errorf("new section name cannot be empty")), nil
@@ -271,23 +464,9 @@ func (w *Writer) DeleteSection(listHint, sectionHint string, force bool) (map[st
 }
 
 func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, reminderIDs []string, clearOnly bool) error {
-	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	listRecord, fields, membershipFile, err := w.loadMembershipFile(ownerID, listID)
 	if err != nil {
 		return err
-	}
-
-	fields, _ := listRecord["fields"].(map[string]interface{})
-	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
-	membershipFile := &sections.MembershipFile{}
-	if assetURL != "" {
-		rawAsset, err := w.CK.DownloadAsset(assetURL)
-		if err != nil {
-			return fmt.Errorf("download memberships asset: %w", err)
-		}
-		membershipFile, err = sections.DecodeMembershipFile(rawAsset)
-		if err != nil {
-			return fmt.Errorf("decode memberships asset: %w", err)
-		}
 	}
 
 	if clearOnly {
@@ -296,66 +475,7 @@ func (w *Writer) applySectionMembership(ownerID, listID, sectionID string, remin
 		sections.UpsertMemberships(membershipFile, sectionID, reminderIDs, appleReferenceSeconds())
 	}
 
-	encoded, err := sections.EncodeMembershipFile(membershipFile)
-	if err != nil {
-		return fmt.Errorf("encode memberships asset: %w", err)
-	}
-
-	tokens, err := w.CK.RequestAssetUploadTokens(ownerID, []cloudkit.AssetUploadTokenRequest{{
-		RecordType: "List",
-		RecordName: listID,
-		FieldName:  "MembershipsOfRemindersInSectionsAsData",
-	}})
-	if err != nil {
-		return fmt.Errorf("request asset upload token: %w", err)
-	}
-	if len(tokens) == 0 {
-		return fmt.Errorf("no asset upload token returned")
-	}
-	uploadURL, _ := tokens[0]["url"].(string)
-	if uploadURL == "" {
-		return fmt.Errorf("asset upload token missing url")
-	}
-
-	assetValue, err := w.CK.UploadAsset(uploadURL, encoded)
-	if err != nil {
-		return fmt.Errorf("upload memberships asset: %w", err)
-	}
-
-	changeTag, _ := listRecord["recordChangeTag"].(string)
-	if changeTag == "" {
-		return fmt.Errorf("list %s missing change tag", listID)
-	}
-
-	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
-		"operationType": "update",
-		"record": map[string]interface{}{
-			"recordType":      "List",
-			"recordName":      listID,
-			"recordChangeTag": changeTag,
-			"fields": map[string]interface{}{
-				"MembershipsOfRemindersInSectionsAsData": map[string]interface{}{
-					"value": assetValue,
-				},
-				"MembershipsOfRemindersInSectionsChecksum": map[string]interface{}{
-					"value":       checksumHex(encoded),
-					"type":        "STRING",
-					"isEncrypted": true,
-				},
-				"ResolutionTokenMap": map[string]interface{}{
-					"value": bumpListResolutionTokenMap(fields, "membershipsOfRemindersInSectionsChecksum"),
-					"type":  "STRING",
-				},
-			},
-		},
-	}})
-	if err != nil {
-		return err
-	}
-	if recErr := checkRecordErrors(result); recErr != nil {
-		return recErr
-	}
-	return nil
+	return w.persistMembershipFile(ownerID, listID, listRecord, fields, membershipFile)
 }
 
 func (w *Writer) sectionIDForReminder(ownerID, listID, reminderID string) (string, error) {
@@ -390,6 +510,10 @@ func (w *Writer) deleteSectionIfEmpty(ownerID, listID, sectionID string) error {
 	if len(memberIDs) > 0 {
 		return nil
 	}
+	return w.deleteSectionRecord(ownerID, listID, sectionID)
+}
+
+func (w *Writer) deleteSectionRecord(ownerID, listID, sectionID string) error {
 	recordName, record, err := w.lookupSectionRecord(ownerID, listID, sectionID)
 	if err != nil {
 		return nil
@@ -419,32 +543,47 @@ func (w *Writer) deleteSectionIfEmpty(ownerID, listID, sectionID string) error {
 }
 
 func (w *Writer) clearOrphanSectionMemberships(ownerID, listID, sectionID string) ([]string, error) {
-	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	listRecord, fields, membershipFile, err := w.loadMembershipFile(ownerID, listID)
 	if err != nil {
 		return nil, err
-	}
-	fields, _ := listRecord["fields"].(map[string]interface{})
-	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
-	if assetURL == "" {
-		return nil, nil
-	}
-	rawAsset, err := w.CK.DownloadAsset(assetURL)
-	if err != nil {
-		return nil, fmt.Errorf("download memberships asset: %w", err)
-	}
-	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
-	if err != nil {
-		return nil, fmt.Errorf("decode memberships asset: %w", err)
 	}
 
 	removed := sections.RemoveSection(membershipFile, sectionID)
 	if len(removed) == 0 {
 		return nil, nil
 	}
+	if err := w.persistMembershipFile(ownerID, listID, listRecord, fields, membershipFile); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
 
+func (w *Writer) loadMembershipFile(ownerID, listID string) (map[string]interface{}, map[string]interface{}, *sections.MembershipFile, error) {
+	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fields, _ := listRecord["fields"].(map[string]interface{})
+	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
+	membershipFile := &sections.MembershipFile{}
+	if assetURL == "" {
+		return listRecord, fields, membershipFile, nil
+	}
+	rawAsset, err := w.CK.DownloadAsset(assetURL)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("download memberships asset: %w", err)
+	}
+	membershipFile, err = sections.DecodeMembershipFile(rawAsset)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("decode memberships asset: %w", err)
+	}
+	return listRecord, fields, membershipFile, nil
+}
+
+func (w *Writer) persistMembershipFile(ownerID, listID string, listRecord, fields map[string]interface{}, membershipFile *sections.MembershipFile) error {
 	encoded, err := sections.EncodeMembershipFile(membershipFile)
 	if err != nil {
-		return nil, fmt.Errorf("encode memberships asset: %w", err)
+		return fmt.Errorf("encode memberships asset: %w", err)
 	}
 	tokens, err := w.CK.RequestAssetUploadTokens(ownerID, []cloudkit.AssetUploadTokenRequest{{
 		RecordType: "List",
@@ -452,23 +591,22 @@ func (w *Writer) clearOrphanSectionMemberships(ownerID, listID, sectionID string
 		FieldName:  "MembershipsOfRemindersInSectionsAsData",
 	}})
 	if err != nil {
-		return nil, fmt.Errorf("request asset upload token: %w", err)
+		return fmt.Errorf("request asset upload token: %w", err)
 	}
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("no asset upload token returned")
+		return fmt.Errorf("no asset upload token returned")
 	}
 	uploadURL, _ := tokens[0]["url"].(string)
 	if uploadURL == "" {
-		return nil, fmt.Errorf("asset upload token missing url")
+		return fmt.Errorf("asset upload token missing url")
 	}
-
 	assetValue, err := w.CK.UploadAsset(uploadURL, encoded)
 	if err != nil {
-		return nil, fmt.Errorf("upload memberships asset: %w", err)
+		return fmt.Errorf("upload memberships asset: %w", err)
 	}
 	changeTag, _ := listRecord["recordChangeTag"].(string)
 	if changeTag == "" {
-		return nil, fmt.Errorf("list %s missing change tag", listID)
+		return fmt.Errorf("list %s missing change tag", listID)
 	}
 	result, err := w.modifyRecordsWithRetry(ownerID, []map[string]interface{}{{
 		"operationType": "update",
@@ -493,12 +631,17 @@ func (w *Writer) clearOrphanSectionMemberships(ownerID, listID, sectionID string
 		},
 	}})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if recErr := checkRecordErrors(result); recErr != nil {
-		return nil, recErr
+	return checkRecordErrors(result)
+}
+
+func resolveListName(fields map[string]interface{}, fallback string) string {
+	name := strings.TrimSpace(getFieldStringValue(fields, "Name"))
+	if name != "" {
+		return name
 	}
-	return removed, nil
+	return shortID(fallback)
 }
 
 func (w *Writer) lookupSectionRecord(ownerID, listID, sectionHint string) (string, map[string]interface{}, error) {
@@ -515,20 +658,7 @@ func (w *Writer) lookupSectionRecord(ownerID, listID, sectionHint string) (strin
 }
 
 func (w *Writer) memberIDsForSection(ownerID, listID, sectionID string) ([]string, error) {
-	listRecord, err := lookupRecord(w.CK, ownerID, listID)
-	if err != nil {
-		return nil, err
-	}
-	fields, _ := listRecord["fields"].(map[string]interface{})
-	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
-	if assetURL == "" {
-		return nil, nil
-	}
-	rawAsset, err := w.CK.DownloadAsset(assetURL)
-	if err != nil {
-		return nil, err
-	}
-	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
+	_, _, membershipFile, err := w.loadMembershipFile(ownerID, listID)
 	if err != nil {
 		return nil, err
 	}
@@ -539,6 +669,21 @@ func (w *Writer) memberIDsForSection(ownerID, listID, sectionID string) ([]strin
 		}
 	}
 	return ids, nil
+}
+
+func (w *Writer) visibleSectionMemberIDs(memberIDs []string) []string {
+	visible := make([]string, 0, len(memberIDs))
+	for _, memberID := range memberIDs {
+		reminder := w.Sync.Cache.Reminders[memberID]
+		if reminder == nil {
+			reminder = w.Sync.Cache.Reminders[sections.ReminderRecordName(memberID)]
+		}
+		if reminder == nil || reminder.Completed {
+			continue
+		}
+		visible = append(visible, memberID)
+	}
+	return visible
 }
 
 func (w *Writer) resolveReminderRef(reminderHint string) (string, error) {
@@ -656,53 +801,154 @@ func (w *Writer) findSectionInCache(listID, target string) (string, string, bool
 }
 
 func (w *Writer) findSectionViaMemberships(ownerID, listID, target string) (string, string, bool) {
-	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	membershipSections, err := w.membershipSections(ownerID, listID)
 	if err != nil {
 		return "", "", false
+	}
+	for _, section := range membershipSections {
+		if strings.ToLower(section.Name) == target || strings.ToLower(section.ID) == target {
+			return section.ID, section.Name, true
+		}
+	}
+	return "", "", false
+}
+
+func (w *Writer) listSections(ownerID, listID string) ([]SectionInfo, error) {
+	seen := make(map[string]SectionInfo)
+	membershipSections, err := w.membershipSections(ownerID, listID)
+	if err != nil {
+		return nil, err
+	}
+	for _, section := range membershipSections {
+		seen[section.ID] = section
+	}
+	for recordName, section := range w.Sync.Cache.Sections {
+		if section == nil || section.ListRef == nil || *section.ListRef != listID {
+			continue
+		}
+		sectionID := shortID(recordName)
+		name := strings.TrimSpace(section.Name)
+		if name == "" && section.CanonicalName != nil {
+			name = strings.TrimSpace(*section.CanonicalName)
+		}
+		if name == "" {
+			name = sectionID
+		}
+		seen[sectionID] = SectionInfo{ID: sectionID, Name: name}
+	}
+
+	token := ""
+	const maxPages = 16
+	for page := 1; page <= maxPages; page++ {
+		data, err := w.CK.ChangesZone(ownerID, token)
+		if err != nil {
+			return nil, err
+		}
+		zones, _ := data["zones"].([]interface{})
+		if len(zones) == 0 {
+			break
+		}
+		zone, _ := zones[0].(map[string]interface{})
+		records, _ := zone["records"].([]interface{})
+		for _, raw := range records {
+			record, _ := raw.(map[string]interface{})
+			recordType, _ := record["recordType"].(string)
+			if recordType != "ListSection" {
+				continue
+			}
+			fields, _ := record["fields"].(map[string]interface{})
+			if getReferenceRecordName(fields, "List") != listID {
+				continue
+			}
+			recordName, _ := record["recordName"].(string)
+			sectionID := shortID(recordName)
+			name := resolveSectionName(fields, sectionID)
+			seen[sectionID] = SectionInfo{ID: sectionID, Name: name}
+		}
+		moreComing, _ := zone["moreComing"].(bool)
+		if !moreComing {
+			break
+		}
+		token, _ = zone["syncToken"].(string)
+		if token == "" {
+			break
+		}
+	}
+
+	out := make([]SectionInfo, 0, len(seen))
+	for _, section := range seen {
+		out = append(out, section)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (w *Writer) membershipSections(ownerID, listID string) ([]SectionInfo, error) {
+	listRecord, err := lookupRecord(w.CK, ownerID, listID)
+	if err != nil {
+		return nil, err
 	}
 	fields, _ := listRecord["fields"].(map[string]interface{})
 	assetURL := getAssetDownloadURL(fields, "MembershipsOfRemindersInSectionsAsData")
 	if assetURL == "" {
-		return "", "", false
+		return nil, nil
 	}
 	rawAsset, err := w.CK.DownloadAsset(assetURL)
 	if err != nil {
-		return "", "", false
+		return nil, err
 	}
 	membershipFile, err := sections.DecodeMembershipFile(rawAsset)
 	if err != nil {
-		return "", "", false
+		return nil, err
 	}
+	return membershipSectionInfosFromFile(w.CK, ownerID, membershipFile)
+}
 
-	seen := make(map[string]struct{})
-	recordNames := make([]string, 0, len(membershipFile.Memberships))
-	for _, membership := range membershipFile.Memberships {
-		if _, ok := seen[membership.GroupID]; ok {
-			continue
-		}
-		seen[membership.GroupID] = struct{}{}
-		recordNames = append(recordNames, sections.ListSectionRecordName(membership.GroupID))
+func membershipSectionInfosFromFile(ck *cloudkit.Client, ownerID string, membershipFile *sections.MembershipFile) ([]SectionInfo, error) {
+	groupIDs := sections.UniqueGroupIDs(membershipFile)
+	if len(groupIDs) == 0 {
+		return nil, nil
 	}
-	if len(recordNames) == 0 {
-		return "", "", false
+	recordNames := make([]string, 0, len(groupIDs))
+	for _, groupID := range groupIDs {
+		recordNames = append(recordNames, sections.ListSectionRecordName(groupID))
 	}
-
-	records, err := w.CK.LookupRecords(ownerID, recordNames)
+	infos := make(map[string]SectionInfo, len(groupIDs))
+	for _, groupID := range groupIDs {
+		infos[groupID] = SectionInfo{ID: groupID, Name: groupID}
+	}
+	records, err := ck.LookupRecords(ownerID, recordNames)
 	if err != nil {
-		return "", "", false
+		return nil, err
 	}
 	for _, record := range records {
+		recordName, _ := record["recordName"].(string)
+		sectionID := shortID(recordName)
+		if sectionID == "" {
+			continue
+		}
 		if code, _ := record["serverErrorCode"].(string); code != "" {
 			continue
 		}
-		recordName, _ := record["recordName"].(string)
-		recordFields, _ := record["fields"].(map[string]interface{})
-		name := resolveSectionName(recordFields, shortID(recordName))
-		if strings.ToLower(name) == target || strings.ToLower(shortID(recordName)) == target {
-			return shortID(recordName), name, true
-		}
+		fields, _ := record["fields"].(map[string]interface{})
+		infos[sectionID] = SectionInfo{ID: sectionID, Name: resolveSectionName(fields, sectionID)}
 	}
-	return "", "", false
+	out := make([]SectionInfo, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 func lookupRecord(ck *cloudkit.Client, ownerID, recordName string) (map[string]interface{}, error) {

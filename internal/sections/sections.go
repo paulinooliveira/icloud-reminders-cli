@@ -222,6 +222,28 @@ func RemoveSection(mf *MembershipFile, sectionID string) []string {
 	return removed
 }
 
+// UniqueGroupIDs returns the sorted unique section/group IDs referenced by a
+// membership file.
+func UniqueGroupIDs(mf *MembershipFile) []string {
+	if mf == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(mf.Memberships))
+	out := make([]string, 0, len(mf.Memberships))
+	for _, membership := range mf.Memberships {
+		if membership.GroupID == "" {
+			continue
+		}
+		if _, ok := seen[membership.GroupID]; ok {
+			continue
+		}
+		seen[membership.GroupID] = struct{}{}
+		out = append(out, membership.GroupID)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // CanonicalName returns a stable kebab-case-like section identifier.
 func CanonicalName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
