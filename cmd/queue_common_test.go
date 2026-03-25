@@ -87,7 +87,7 @@ func TestCanProceedWithoutQueueSync(t *testing.T) {
 	if canProceedWithoutQueueSync(queue.StateItem{}) {
 		t.Fatalf("expected empty state item to require sync")
 	}
-	if !canProceedWithoutQueueSync(queue.StateItem{CloudID: "Reminder/11111111-1111-1111-1111-111111111111"}) {
+	if !canProceedWithoutQueueSync(queue.StateItem{CloudID: "11111111-1111-1111-1111-111111111111"}) {
 		t.Fatalf("expected canonical reminder id to skip sync gate")
 	}
 	if !canProceedWithoutQueueSync(queue.StateItem{CloudID: "ABCDEF12-3456-7890-ABCD-EF1234567890"}) {
@@ -105,10 +105,10 @@ func TestResolveQueueCloudIDRequiresCanonicalID(t *testing.T) {
 	if got := resolveQueueCloudID(""); got != "" {
 		t.Fatalf("empty input should not resolve: got %q", got)
 	}
-	if got := resolveQueueCloudID("Reminder/11111111-1111-1111-1111-111111111111"); got != "Reminder/11111111-1111-1111-1111-111111111111" {
+	if got := resolveQueueCloudID("11111111-1111-1111-1111-111111111111"); got != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("canonical Reminder UUID should resolve, got %q", got)
 	}
-	if got := resolveQueueCloudID("11111111-1111-1111-1111-111111111111"); got != "Reminder/11111111-1111-1111-1111-111111111111" {
+	if got := resolveQueueCloudID("11111111-1111-1111-1111-111111111111"); got != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("bare UUID should resolve, got %q", got)
 	}
 	if got := resolveQueueCloudID("Reminder/ABC"); got != "" {

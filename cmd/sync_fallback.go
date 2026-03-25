@@ -10,10 +10,11 @@ func shouldProceedWithoutSync(hint string) bool {
 	if !allowStaleTarget {
 		return false
 	}
-	if strings.HasPrefix(hint, "Reminder/") {
-		return true
+	bare := hint
+	if idx := strings.LastIndexByte(hint, '/'); idx >= 0 {
+		bare = hint[idx+1:]
 	}
-	return looksLikeReminderUUID(hint)
+	return looksLikeReminderUUID(bare)
 }
 
 func looksLikeReminderUUID(s string) bool {

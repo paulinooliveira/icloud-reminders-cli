@@ -687,8 +687,8 @@ func (w *Writer) visibleSectionMemberIDs(memberIDs []string) []string {
 }
 
 func (w *Writer) resolveReminderRef(reminderHint string) (string, error) {
-	if strings.HasPrefix(reminderHint, "Reminder/") {
-		return reminderHint, nil
+	if looksLikeUUID(reminderHint) {
+		return strings.ToUpper(reminderHint), nil
 	}
 	if rid, _, err := w.resolveReminderRecord(reminderHint); err == nil && rid != "" {
 		return rid, nil

@@ -60,7 +60,7 @@ type completeTestServer struct {
 func newCompleteTestServer(t *testing.T) *completeTestServer {
 	cts := &completeTestServer{
 		t:          t,
-		recordName: "Reminder/22222222-2222-2222-2222-222222222222",
+		recordName: "22222222-2222-2222-2222-222222222222",
 		recordTag:  "ct-complete-1",
 		ownerID:    "_owner",
 	}
@@ -190,12 +190,12 @@ func newCompleteTestWriter(t *testing.T, server *completeTestServer) (*Writer, s
 	}
 	changeTag := server.recordTag
 	title := "Complete me"
-	engine.Cache.Reminders[server.recordName] = &cache.ReminderData{
+	bareID := strings.TrimPrefix(server.recordName, "Reminder/")
+	engine.Cache.Reminders[bareID] = &cache.ReminderData{
 		Title:     title,
 		ChangeTag: &changeTag,
 	}
-	engine.Cache.Reminders[strings.TrimPrefix(server.recordName, "Reminder/")] = &cache.ReminderData{}
 
 	client := cloudkit.NewWithHTTPClient(server.URL(), server.srv.Client())
-	return New(client, engine), server.recordName, func() {}
+	return New(client, engine), bareID, func() {}
 }

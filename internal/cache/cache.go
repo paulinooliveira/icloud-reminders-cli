@@ -46,8 +46,8 @@ func isTestProcess() bool {
 	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 }
 
-// CanonicalReminderKey returns the canonical "Reminder/<UPPER-UUID>" key.
-// Returns "" if id cannot be resolved to a valid UUID.
+// CanonicalReminderKey returns the bare upper-case UUID for a reminder ID.
+// Strips any "Reminder/" prefix. Returns "" if the result is not a valid UUID.
 func CanonicalReminderKey(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -61,7 +61,7 @@ func CanonicalReminderKey(id string) string {
 	if !isValidUUID(upper) {
 		return ""
 	}
-	return "Reminder/" + upper
+	return upper
 }
 
 func isValidUUID(s string) bool {
@@ -100,9 +100,11 @@ func ReminderAliases(id string) []string {
 	if idx := strings.LastIndexByte(id, '/'); idx >= 0 {
 		short = id[idx+1:]
 	}
-	add("Reminder/" + strings.ToUpper(short)) // canonical first
+	add(strings.ToUpper(short)) // canonical: bare upper UUID
 	add(id)
-	add(short)
+	if !strings.Contains(id, "/") {
+		add("Reminder/" + strings.ToUpper(short)) // legacy prefixed form for cleanup
+	}
 	return out
 }
 
@@ -218,7 +220,7 @@ func Load() *Cache {
 	}
 
 	if !isTestProcess() {
-		go migrateJSONCache(db)
+		migrateJSONCache(db)
 	}
 	return c
 }

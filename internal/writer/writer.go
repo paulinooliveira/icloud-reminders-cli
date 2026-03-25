@@ -192,12 +192,17 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 	}
 	ts := time.Now().UnixMilli()
 	rd.ModifiedTS = &ts
-	// Extract recordChangeTag from response so the reminder can be
-	// immediately completed/deleted without requiring a sync first.
+	// Use the recordName CloudKit actually assigned — do not trust the client-side UUID.
 	if records, ok := result["records"].([]interface{}); ok && len(records) > 0 {
 		if rec, ok := records[0].(map[string]interface{}); ok {
 			if ct, ok := rec["recordChangeTag"].(string); ok && ct != "" {
 				rd.ChangeTag = &ct
+			}
+			if serverName, ok := rec["recordName"].(string); ok && serverName != "" {
+				if serverName != recordName {
+					logger.Warnf("add: CloudKit assigned %s instead of requested %s", serverName, recordName)
+				}
+				recordName = serverName
 			}
 		}
 	}
@@ -414,10 +419,11 @@ func isReminderIDHint(hint string) bool {
 	if hint == "" {
 		return false
 	}
-	if strings.HasPrefix(hint, "Reminder/") {
-		return true
+	bare := hint
+	if idx := strings.LastIndexByte(hint, '/'); idx >= 0 {
+		bare = hint[idx+1:]
 	}
-	return looksLikeUUID(hint)
+	return looksLikeUUID(bare)
 }
 
 func isMissingLookupError(err error) bool {
@@ -1219,66 +1225,25 @@ func normalizeReminderID(hint string) string {
 	if hint == "" {
 		return ""
 	}
-	hintUpper := strings.ToUpper(hint)
-	if strings.HasPrefix(hintUpper, "REMINDER/") {
-		uuid := shortID(hintUpper)
-		if !looksLikeUUID(uuid) {
-			return ""
-		}
-		return "Reminder/" + uuid
+	// Strip any Reminder/ prefix — CloudKit IDs are bare UUIDs.
+	bare := hint
+	if idx := strings.LastIndexByte(hint, '/'); idx >= 0 {
+		bare = hint[idx+1:]
 	}
-	if looksLikeUUID(hint) {
-		return "Reminder/" + strings.ToUpper(hint)
+	upper := strings.ToUpper(bare)
+	if !looksLikeUUID(upper) {
+		return ""
 	}
-	return ""
+	return upper
 }
 
 func (w *Writer) canonicalizeReminderRecord(recordName string, rd *cache.ReminderData) (string, *cache.ReminderData, error) {
-	if strings.Contains(recordName, "/") || !looksLikeUUID(recordName) {
-		return recordName, rd, nil
+	// Just normalize the key — strip any prefix, uppercase. No CloudKit call needed.
+	bare := recordName
+	if idx := strings.LastIndexByte(recordName, '/'); idx >= 0 {
+		bare = recordName[idx+1:]
 	}
-
-	ownerID, err := w.ownerID()
-	if err != nil {
-		return recordName, rd, err
-	}
-	for _, candidate := range reminderLookupCandidates(recordName) {
-		record, err := lookupRecord(w.CK, ownerID, candidate)
-		if err != nil {
-			continue
-		}
-		fullID, _ := record["recordName"].(string)
-		if fullID == "" {
-			fullID = candidate
-		}
-		live := reminderDataFromRecord(record)
-		if rd != nil {
-			if live.ChangeTag == nil || *live.ChangeTag == "" {
-				live.ChangeTag = rd.ChangeTag
-			}
-			if live.ListRef == nil {
-				live.ListRef = rd.ListRef
-			}
-			if live.ParentRef == nil {
-				live.ParentRef = rd.ParentRef
-			}
-			if live.Notes == nil {
-				live.Notes = rd.Notes
-			}
-			if len(live.HashtagIDs) == 0 {
-				live.HashtagIDs = append([]string(nil), rd.HashtagIDs...)
-			}
-			if live.Due == nil {
-				live.Due = rd.Due
-			}
-			if live.Priority == 0 {
-				live.Priority = rd.Priority
-			}
-		}
-		w.Sync.Cache.Reminders[fullID] = live
-		return fullID, live, nil
-	}
-	return recordName, rd, nil
+	return strings.ToUpper(bare), rd, nil
 }
 
 func reminderLookupCandidates(hint string) []string {
@@ -1295,14 +1260,13 @@ func reminderLookupCandidates(hint string) []string {
 		candidates = append(candidates, recordName)
 	}
 
-	if strings.HasPrefix(hint, "Reminder/") {
-		add(hint)
-		add(shortID(hint))
-		return candidates
+	// CloudKit uses bare UUIDs. Strip any prefix and try bare + prefixed for compat.
+	bare := hint
+	if idx := strings.LastIndexByte(hint, '/'); idx >= 0 {
+		bare = hint[idx+1:]
 	}
-	if looksLikeUUID(hint) {
-		add("Reminder/" + strings.ToUpper(hint))
-		add(strings.ToUpper(hint))
+	if looksLikeUUID(bare) {
+		add(strings.ToUpper(bare))
 	}
 	return candidates
 }

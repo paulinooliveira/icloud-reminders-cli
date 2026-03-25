@@ -360,7 +360,7 @@ func migrateCKCache(db *sql.DB) error {
 			value TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS ck_reminders (
-			cloud_id        TEXT PRIMARY KEY CHECK(cloud_id LIKE 'Reminder/%'),
+			cloud_id        TEXT PRIMARY KEY,
 			title           TEXT NOT NULL DEFAULT '',
 			completed       INTEGER NOT NULL DEFAULT 0,
 			flagged         INTEGER NOT NULL DEFAULT 0,

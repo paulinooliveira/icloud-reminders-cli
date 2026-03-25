@@ -66,17 +66,16 @@ func resolveQueueCloudID(hint string) string {
 	if hint == "" {
 		return ""
 	}
-	if strings.HasPrefix(strings.ToUpper(hint), "REMINDER/") && strings.TrimSpace(shortReminderID(hint)) != "" {
-		uuid := strings.TrimSpace(shortReminderID(hint))
-		if !looksLikeUUID(uuid) {
-			return ""
-		}
-		return "Reminder/" + strings.ToUpper(uuid)
+	// Strip any Reminder/ prefix — CloudKit IDs are bare UUIDs.
+	bare := hint
+	if idx := strings.LastIndex(bare, "/"); idx >= 0 {
+		bare = bare[idx+1:]
 	}
-	if looksLikeUUID(hint) {
-		return "Reminder/" + strings.ToUpper(hint)
+	upper := strings.ToUpper(strings.TrimSpace(bare))
+	if !looksLikeUUID(upper) {
+		return ""
 	}
-	return ""
+	return upper
 }
 
 func buildQueuePreview(state *queue.State, spec queue.Spec, now time.Time) queue.StateItem {

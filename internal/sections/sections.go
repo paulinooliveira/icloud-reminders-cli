@@ -67,12 +67,12 @@ func ListSectionRecordName(sectionID string) string {
 	return "ListSection/" + sectionID
 }
 
-// ReminderRecordName returns the CloudKit record name for a reminder.
+// ReminderRecordName returns the bare UUID for a reminder, stripping any prefix.
 func ReminderRecordName(reminderID string) string {
-	if strings.HasPrefix(reminderID, "Reminder/") {
-		return reminderID
+	if idx := strings.LastIndexByte(reminderID, '/'); idx >= 0 {
+		return strings.ToUpper(reminderID[idx+1:])
 	}
-	return "Reminder/" + reminderID
+	return strings.ToUpper(reminderID)
 }
 
 // OrderedSections builds stable section output from display names and memberships.

@@ -59,7 +59,7 @@ func TestSetReminderEnforcesCanonicalKey(t *testing.T) {
 	if err := c.SetReminder("b267cc2e-e156-4cce-9ded-e1e5576f4911", rd); err != nil {
 		t.Fatalf("SetReminder bare: %v", err)
 	}
-	const canonical = "Reminder/B267CC2E-E156-4CCE-9DED-E1E5576F4911"
+	const canonical = "B267CC2E-E156-4CCE-9DED-E1E5576F4911"
 	if c.Reminders[canonical] == nil {
 		t.Fatalf("expected entry under canonical key %q", canonical)
 	}
@@ -76,7 +76,7 @@ func TestGetReminderFindsBareAlias(t *testing.T) {
 	// simulate old code that stored under bare UUID
 	c.Reminders["B267CC2E-E156-4CCE-9DED-E1E5576F4911"] = rd
 
-	got := c.GetReminder("Reminder/B267CC2E-E156-4CCE-9DED-E1E5576F4911")
+	got := c.GetReminder("B267CC2E-E156-4CCE-9DED-E1E5576F4911")
 	if got == nil {
 		t.Fatal("GetReminder should find entry stored under bare UUID")
 	}
@@ -87,7 +87,7 @@ func TestReminderAliasesCanonicalFirst(t *testing.T) {
 	if len(aliases) == 0 {
 		t.Fatal("expected aliases")
 	}
-	if aliases[0] != "Reminder/B267CC2E-E156-4CCE-9DED-E1E5576F4911" {
+	if aliases[0] != "B267CC2E-E156-4CCE-9DED-E1E5576F4911" {
 		t.Fatalf("first alias should be canonical, got %q", aliases[0])
 	}
 }

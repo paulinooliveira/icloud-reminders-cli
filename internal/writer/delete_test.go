@@ -142,7 +142,7 @@ func newDeleteTestServer(t *testing.T, behavior deleteTestBehavior) *deleteTestS
 	dts := &deleteTestServer{
 		t:          t,
 		behavior:   behavior,
-		reminderID: "Reminder/11111111-1111-1111-1111-111111111111",
+		reminderID: "11111111-1111-1111-1111-111111111111",
 		recordTag:  "ct-delete-1",
 		ownerID:    "_owner",
 	}
@@ -271,9 +271,10 @@ func newDeleteTestWriter(t *testing.T, server *deleteTestServer) (*Writer, strin
 		Title:     "Audit finance statement coverage and parsing",
 		ChangeTag: &changeTag,
 	}
-	engine.Cache.Reminders[server.reminderID] = rd
-	engine.Cache.Reminders[strings.TrimPrefix(server.reminderID, "Reminder/")] = &cache.ReminderData{}
+	// Store under bare UUID — that's the canonical key now.
+	bareID := strings.TrimPrefix(server.reminderID, "Reminder/")
+	engine.Cache.Reminders[bareID] = rd
 
 	client := cloudkit.NewWithHTTPClient(server.URL(), server.srv.Client())
-	return New(client, engine), server.reminderID, server.reminderID, func() {}
+	return New(client, engine), bareID, bareID, func() {}
 }

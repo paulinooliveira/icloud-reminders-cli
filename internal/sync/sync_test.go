@@ -8,7 +8,7 @@ import (
 )
 
 const testUUID = "B267CC2E-E156-4CCE-9DED-E1E5576F4911"
-const testCanonical = "Reminder/B267CC2E-E156-4CCE-9DED-E1E5576F4911"
+const testCanonical = "B267CC2E-E156-4CCE-9DED-E1E5576F4911"
 
 func TestProcessRecordsDeletesReminderAliases(t *testing.T) {
 	engine := &Engine{Cache: cache.NewCache()}

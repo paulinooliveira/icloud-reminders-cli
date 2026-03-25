@@ -14,12 +14,12 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 		Items: map[string]queue.StateItem{
 			"parent": {
 				Title:   "Parent",
-				CloudID: "Reminder/11111111-1111-1111-1111-111111111111",
+				CloudID: "11111111-1111-1111-1111-111111111111",
 				Children: map[string]queue.ChildStateItem{
 					"child": {
 						Key:      "child",
 						Title:    "Old title",
-						CloudID:  "Reminder/22222222-2222-2222-2222-222222222222",
+						CloudID:  "22222222-2222-2222-2222-222222222222",
 						Due:      &due,
 						Priority: 9,
 						Flagged:  true,
@@ -33,7 +33,7 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 	oldEdit := queueChildEditReminder
 	oldSync := syncEngine
 	syncEngine = &sync.Engine{Cache: cache.NewCache()}
-	syncEngine.Cache.Reminders["Reminder/11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
+	syncEngine.Cache.Reminders["11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
 		ListRef: pointer("List/SEB"),
 	}
 
@@ -46,24 +46,24 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 		if title != "New title" {
 			t.Fatalf("expected new child title, got %q", title)
 		}
-		if parentID != "Reminder/11111111-1111-1111-1111-111111111111" {
+		if parentID != "11111111-1111-1111-1111-111111111111" {
 			t.Fatalf("expected parent cloud id parent, got %q", parentID)
 		}
 		if listName != "List/SEB" {
 			t.Fatalf("expected parent list id, got %q", listName)
 		}
-		return map[string]interface{}{"id": "Reminder/33333333-3333-3333-3333-333333333333"}, nil
+		return map[string]interface{}{"id": "33333333-3333-3333-3333-333333333333"}, nil
 	}
 	queueChildDeleteReminder = func(reminderID string) (map[string]interface{}, error) {
 		deleteCalls++
-		if reminderID != "Reminder/22222222-2222-2222-2222-222222222222" && reminderID != "Reminder/33333333-3333-3333-3333-333333333333" {
+		if reminderID != "22222222-2222-2222-2222-222222222222" && reminderID != "33333333-3333-3333-3333-333333333333" {
 			t.Fatalf("unexpected delete id %q", reminderID)
 		}
 		return map[string]interface{}{}, nil
 	}
 	queueChildEditReminder = func(reminderID string, _ writer.ReminderChanges) (map[string]interface{}, error) {
 		editCalls++
-		if reminderID != "Reminder/33333333-3333-3333-3333-333333333333" {
+		if reminderID != "33333333-3333-3333-3333-333333333333" {
 			t.Fatalf("unexpected edited reminder %q", reminderID)
 		}
 		return map[string]interface{}{}, nil
@@ -81,7 +81,7 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 
 	parent := state.Items["parent"]
 	child := parent.Children["child"]
-	if child.CloudID != "Reminder/33333333-3333-3333-3333-333333333333" {
+	if child.CloudID != "33333333-3333-3333-3333-333333333333" {
 		t.Fatalf("expected recreated child cloud id, got %q", child.CloudID)
 	}
 	if child.Title != "New title" {
@@ -100,12 +100,12 @@ func TestUpsertQueueChildUpdatesDueWithoutRecreate(t *testing.T) {
 		Items: map[string]queue.StateItem{
 			"parent": {
 				Title:   "Parent",
-				CloudID: "Reminder/11111111-1111-1111-1111-111111111111",
+				CloudID: "11111111-1111-1111-1111-111111111111",
 				Children: map[string]queue.ChildStateItem{
 					"child": {
 						Key:     "child",
 						Title:   "Child",
-						CloudID: "Reminder/22222222-2222-2222-2222-222222222222",
+						CloudID: "22222222-2222-2222-2222-222222222222",
 					},
 				},
 			},
@@ -116,7 +116,7 @@ func TestUpsertQueueChildUpdatesDueWithoutRecreate(t *testing.T) {
 	oldEdit := queueChildEditReminder
 	oldSync := syncEngine
 	syncEngine = &sync.Engine{Cache: cache.NewCache()}
-	syncEngine.Cache.Reminders["Reminder/11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
+	syncEngine.Cache.Reminders["11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
 		ListRef: pointer("List/SEB"),
 	}
 
@@ -172,7 +172,7 @@ func TestUpsertQueueChildRequiresChildReminderIdFromAdd(t *testing.T) {
 		Items: map[string]queue.StateItem{
 			"parent": {
 				Title:    "Parent",
-				CloudID:  "Reminder/11111111-1111-1111-1111-111111111111",
+				CloudID:  "11111111-1111-1111-1111-111111111111",
 				Children: map[string]queue.ChildStateItem{},
 			},
 		},
@@ -182,7 +182,7 @@ func TestUpsertQueueChildRequiresChildReminderIdFromAdd(t *testing.T) {
 	oldEdit := queueChildEditReminder
 	oldSync := syncEngine
 	syncEngine = &sync.Engine{Cache: cache.NewCache()}
-	syncEngine.Cache.Reminders["Reminder/11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
+	syncEngine.Cache.Reminders["11111111-1111-1111-1111-111111111111"] = &cache.ReminderData{
 		ListRef: pointer("List/SEB"),
 	}
 

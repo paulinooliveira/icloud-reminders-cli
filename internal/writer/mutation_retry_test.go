@@ -46,7 +46,7 @@ func newModifyRetryTestServer(t *testing.T) *modifyRetryTestServer {
 	s := &modifyRetryTestServer{
 		t:      t,
 		owner:  "owner",
-		record: "Reminder/11111111-1111-1111-1111-111111111111",
+		record: "11111111-1111-1111-1111-111111111111",
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s

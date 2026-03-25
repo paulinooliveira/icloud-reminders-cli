@@ -352,7 +352,7 @@ func (e *Engine) GetReminders(includeCompleted bool) []*models.Reminder {
 	var result []*models.Reminder
 	for rid, data := range e.Cache.Reminders {
 		// Skip bare-UUID entries — only canonical Reminder/UUID keys are authoritative.
-		if !strings.HasPrefix(rid, "Reminder/") {
+		if cache.CanonicalReminderKey(rid) == "" {
 			continue
 		}
 		if !includeCompleted && data.Completed {

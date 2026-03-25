@@ -547,7 +547,7 @@ func TestResolveParentRefAcceptsIDOnly(t *testing.T) {
 	engine := &iclouddsync.Engine{
 		Cache: &cache.Cache{
 			Reminders: map[string]*cache.ReminderData{
-				"Reminder/11111111-1111-1111-1111-111111111111": {
+				"11111111-1111-1111-1111-111111111111": {
 					Title:   "explorer",
 					ListRef: strPtr("List/sebastian"),
 				},
@@ -555,7 +555,7 @@ func TestResolveParentRefAcceptsIDOnly(t *testing.T) {
 		},
 	}
 
-	if got := resolveParentRef(engine, "Reminder/11111111-1111-1111-1111-111111111111", "List/sebastian"); got != "Reminder/11111111-1111-1111-1111-111111111111" {
+	if got := resolveParentRef(engine, "11111111-1111-1111-1111-111111111111", "List/sebastian"); got != "11111111-1111-1111-1111-111111111111" {
 		t.Fatalf("id parent resolution mismatch: got %q", got)
 	}
 	if got := resolveParentRef(engine, "explorer", "List/sebastian"); got != "" {
@@ -634,7 +634,7 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	engine := &iclouddsync.Engine{
 		Cache: &cache.Cache{
 			Reminders: map[string]*cache.ReminderData{
-				"Reminder/" + testReminderID: {
+				testReminderID: {
 					Title: "Original title",
 					Notes: strPtr("Original body"),
 				},
@@ -647,7 +647,7 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	w := &Writer{Sync: engine}
 	bridge := applebridge.New(&applebridge.Config{Host: "example-host", User: "tester", IdentityPath: "/tmp/key"})
 
-	result, err := w.SafeTextEditReminder("Reminder/"+testReminderID, strPtr("Updated title"), strPtr("Updated body"), bridge)
+	result, err := w.SafeTextEditReminder(testReminderID, strPtr("Updated title"), strPtr("Updated body"), bridge)
 	if err != nil {
 		t.Fatalf("SafeTextEditReminder error: %v", err)
 	}
