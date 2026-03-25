@@ -239,8 +239,9 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 		if appleID == "" {
 			appleID = "x-apple-reminder://" + shortReminderID(cloudID)
 		}
-		// Final convergence pass: enforce a single top-level reminder for this queue item title.
-		// This is intentionally strict (Shape Up: don't babysit the system).
+		// Final convergence pass: enforce a single top-level reminder for this queue item key by stable id.
+		// Keep this strict but ID-led: if a stale duplicate exists, only title-convergent records for the
+		// same rendered title are removed.
 		if err := syncEngine.Sync(false); err != nil && !shouldProceedWithoutSync(cloudID) {
 			return queueReconcileResult{}, err
 		}
@@ -314,23 +315,19 @@ func repairUniqueTitleInList(listID, expectedTitle, keepCloudID string) error {
 
 	// Titles we consider "the same item" for convergence purposes.
 	base := strings.TrimSpace(strings.TrimSuffix(expected, " [blocked]"))
-	var wanted []string
+	wanted := map[string]struct{}{}
 	if base != "" {
-		wanted = append(wanted, base)
-		wanted = append(wanted, base+" [blocked]")
+		wanted[base] = struct{}{}
+		wanted[base+" [blocked]"] = struct{}{}
 	}
 	if expected != base {
-		wanted = append(wanted, expected)
+		wanted[expected] = struct{}{}
 	}
 
 	isWanted := func(title string) bool {
 		t := strings.TrimSpace(title)
-		for _, w := range wanted {
-			if t == w || isRepeatedTitleVariant(t, w) {
-				return true
-			}
-		}
-		return false
+		_, ok := wanted[t]
+		return ok
 	}
 
 	for pass := 0; pass < 4; pass++ {
@@ -500,7 +497,7 @@ func deleteCloudRecordStrict(id string) error {
 			return lastErr
 		}
 		if missing, ok := result["missing"].(bool); ok && missing {
-			return fmt.Errorf("delete reported missing for live id %s", id)
+			return nil
 		}
 		return nil
 	}
@@ -508,18 +505,6 @@ func deleteCloudRecordStrict(id string) error {
 		return lastErr
 	}
 	return fmt.Errorf("delete failed for %s", id)
-}
-
-func isRepeatedTitleVariant(title, expected string) bool {
-	if expected == "" {
-		return false
-	}
-	for n := 2; n <= 4; n++ {
-		if title == strings.Repeat(expected, n) {
-			return true
-		}
-	}
-	return false
 }
 
 func chooseCanonicalCloudMatch(matches []*models.Reminder, preferredCloudID string) *models.Reminder {
