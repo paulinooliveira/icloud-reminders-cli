@@ -1093,6 +1093,10 @@ def cmd_queue_sync(args, api):
     rem_api = _RemindersAPI(api, owner, list_name)
     items = db.list_queue_items()
 
+    # Fetch existing Apple reminders once for title-matching
+    lst = find_list(api, owner, list_name)
+    cloud_rems = get_reminders(api, owner, lst["uuid"]) if lst else []
+
     created, updated, failed = 0, 0, 0
     for raw in items:
         item = _deserialize_item(raw)
@@ -1102,12 +1106,19 @@ def cmd_queue_sync(args, api):
             title = title.rstrip() + " [blocked]" if "[blocked]" not in title else title
         try:
             if not item.cloud_id:
-                result = rem_api.create_reminder(title, priority=item.priority,
-                    notes=notes, flagged=item.flagged, due=item.due)
-                cloud_id = result.get("id") or result.get("cloud_id") or result.get("guid")
+                # Match by title before creating — avoid duplicates
+                cloud_id = None
+                for r in cloud_rems:
+                    if extract_title(r.get("fields",{}).get("TitleDocument",{}).get("value","")) == title:
+                        cloud_id = bare_id(r.get("recordName",""))
+                        break
+                if not cloud_id:
+                    result = rem_api.create_reminder(title, priority=item.priority,
+                        notes=notes, flagged=item.flagged, due=item.due)
+                    cloud_id = result.get("id") or result.get("cloud_id") or result.get("guid")
+                    created += 1
                 if cloud_id:
                     db._db.upsert_queue_item(item.key, item.title, cloud_id=cloud_id)
-                created += 1
             else:
                 rem_api.edit_reminder(item.cloud_id, title=title, notes=notes,
                     priority=item.priority, flagged=item.flagged)
