@@ -95,7 +95,20 @@ def ck_params(api):
     return {**api.params, "getCurrentSyncToken": "true", "remapEnums": "true"}
 
 def ck_post(api, path, body):
-    resp = api.session.post(f"{ck_url(api)}/{path}", params=ck_params(api), json=body)
+    for attempt in range(4):
+        resp = api.session.post(f"{ck_url(api)}/{path}", params=ck_params(api), json=body)
+        if resp.status_code == 503:
+            retry_after = 2 ** attempt  # 1, 2, 4, 8 seconds
+            try:
+                retry_after = max(retry_after, int(resp.json().get("retryAfter", retry_after)))
+            except Exception:
+                pass
+            import sys
+            print(f"CloudKit throttled, retrying in {retry_after}s...", file=sys.stderr)
+            time.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        return resp.json()
     resp.raise_for_status()
     return resp.json()
 
@@ -1141,6 +1154,15 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # Local-only commands skip iCloud auth entirely (fast, no network)
+    LOCAL_CMDS = {"queue-state-json": cmd_queue_state_json}
+    if args.command in LOCAL_CMDS:
+        try:
+            LOCAL_CMDS[args.command](args, None)
+        except Exception as e:
+            die(f"Error: {e}")
+        return
 
     api = get_api(prompt_creds=(args.command == "auth"))
     cmds = {
