@@ -528,7 +528,7 @@ def _bump_resolution_map(fields, touched_keys):
     now = _time.time() - 978307200  # Apple epoch offset
     for key in touched_keys + ["lastModifiedDate"]:
         entry = m.get(key, {})
-        entry["counter"] = entry.get("counter", 0) + 1
+        entry["counter"] = max(entry.get("counter", 0) + 1, 100)
         entry["modificationTime"] = now
         if "replicaID" not in entry:
             entry["replicaID"] = str(uuid.uuid4()).upper()
@@ -656,15 +656,19 @@ def cmd_delete(args, api):
     tag    = rec.get("recordChangeTag")
     rn     = rec.get("recordName")
 
-    # Soft delete: Deleted=1, empty title, bump ResolutionTokenMap.
-    # The counter bump ensures the Mac's CRDT resolver treats this as newer
-    # than its local state, preventing it from re-pushing the old record.
+    # Soft delete: Deleted=1, Completed=1, empty title, high CRDT counters.
+    # Uses the existing replicaID with counter=999 so the Mac's CRDT resolver
+    # treats this as authoritative and won't re-push from local state.
     existing = rec.get("fields", {})
+    now_apple = time.time() - 978307200
+    rtm = _bump_resolution_map(existing,
+        ["titleDocument", "deleted", "completed", "lastModifiedDate"])
     fields = {
         "Deleted": {"value": 1},
+        "Completed": {"value": 1},
         "TitleDocument": {"value": encode_title("")},
         "LastModifiedDate": {"value": int(time.time() * 1000), "type": "TIMESTAMP"},
-        "ResolutionTokenMap": {"value": _bump_resolution_map(existing, ["titleDocument", "deleted"]), "type": "STRING"},
+        "ResolutionTokenMap": {"value": rtm, "type": "STRING"},
     }
     ck_post(api, "records/modify", {
         "zoneID": zone_id(owner),
