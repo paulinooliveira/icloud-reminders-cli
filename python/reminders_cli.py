@@ -537,6 +537,67 @@ def _bump_resolution_map(fields, touched_keys):
     return json.dumps(rtm)
 
 
+def replace_crdt_text(existing_td_b64, new_text):
+    """Replace the text in an existing CRDT TitleDocument, preserving ops/metadata."""
+    if not existing_td_b64:
+        return encode_title(new_text)
+    try:
+        compressed = base64.b64decode(existing_td_b64)
+        if compressed[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(compressed)
+        elif compressed[0] == 0x78:
+            raw = zlib.decompress(compressed)
+        else:
+            return encode_title(new_text)
+        
+        new_bytes = new_text.encode("utf-8")
+        new_char_len = len(new_text)
+        
+        # Parse: outer -> field2(doc) -> field3(note)
+        docs = _extract_field(raw, 2)
+        if not docs:
+            return encode_title(new_text)
+        doc = docs[0]
+        notes = _extract_field(doc, 3)
+        if not notes:
+            return encode_title(new_text)
+        note = notes[0]
+        
+        # Rebuild note: new text (field 2), keep ops (field 3) + metadata (field 4), new attrrun (field 5)
+        new_note = _field(2, 2, new_bytes)
+        
+        i = 0
+        while i < len(note):
+            tag_val = 0; shift = 0; start = i
+            while i < len(note):
+                b = note[i]; i += 1
+                tag_val |= (b & 0x7f) << shift; shift += 7
+                if not (b & 0x80): break
+            fn = tag_val >> 3; wt = tag_val & 7
+            if wt == 0:
+                while i < len(note):
+                    b = note[i]; i += 1
+                    if not (b & 0x80): break
+            elif wt == 2:
+                length = 0; shift = 0
+                while i < len(note):
+                    b = note[i]; i += 1
+                    length |= (b & 0x7f) << shift; shift += 7
+                    if not (b & 0x80): break
+                if fn in (3, 4):  # keep ops and metadata as-is
+                    new_note += note[start:i + length]
+                i += length
+            else:
+                break
+        
+        new_note += _field(5, 2, _field(1, 0, new_char_len))
+        new_doc = _field(1, 0, 0) + _field(2, 0, 0) + _field(3, 2, new_note)
+        new_outer = _field(1, 0, 0) + _field(2, 2, new_doc)
+        return base64.b64encode(zlib.compress(new_outer)).decode()
+    except Exception:
+        return encode_title(new_text)
+
+
 def cmd_edit(args, api):
     owner  = get_owner(api)
     rec    = find_reminder_by_id(api, owner, args.guid)
@@ -546,13 +607,11 @@ def cmd_edit(args, api):
     touched = []
     if args.title    is not None:
         existing_td = fields.get("TitleDocument", {}).get("value", "")
-        existing_uuid = extract_doc_uuid(existing_td)
-        fields["TitleDocument"] = {"value": encode_title(args.title, doc_uuid=existing_uuid)}
+        fields["TitleDocument"] = {"value": replace_crdt_text(existing_td, args.title)}
         touched.append("titleDocument")
     if args.notes    is not None:
         existing_nd = fields.get("NotesDocument", {}).get("value", "")
-        existing_uuid = extract_doc_uuid(existing_nd)
-        fields["NotesDocument"] = {"value": encode_title(args.notes, doc_uuid=existing_uuid)}
+        fields["NotesDocument"] = {"value": replace_crdt_text(existing_nd, args.notes)}
         touched.append("notesDocument")
     if args.priority is not None:
         fields["Priority"]      = {"value": PRIORITY_MAP.get(args.priority, 0)}
