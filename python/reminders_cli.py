@@ -1187,6 +1187,23 @@ def cmd_queue_audit(args, api):
             print(m)
 
 
+def _trigger_background_sync():
+    """Fire queue-sync in background after a write. Non-blocking."""
+    import subprocess, os
+    try:
+        log = open("/tmp/queue-sync.log", "a")
+        subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders_cli.py"), "queue-sync"],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        pass  # best-effort, never block the model
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reminders_cli", description="iCloud Reminders CLI")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -1284,6 +1301,9 @@ def main():
             LOCAL_CMDS[args.command](args, None)
         except Exception as e:
             die(f"Error: {e}")
+        # Auto-sync after writes (non-blocking background process)
+        if args.command not in ("queue-state-json",):
+            _trigger_background_sync()
         return
 
     api = get_api(prompt_creds=(args.command == "auth"))
