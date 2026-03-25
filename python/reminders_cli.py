@@ -655,24 +655,16 @@ def cmd_delete(args, api):
     rec    = find_reminder_by_id(api, owner, args.guid)
     tag    = rec.get("recordChangeTag")
     rn     = rec.get("recordName")
-    now_ms = int(time.time() * 1000)
-
-    fields = dict(rec.get("fields", {}))
-    fields["Completed"]      = {"value": 1}
-    fields["CompletionDate"] = {"value": now_ms}
 
     ck_post(api, "records/modify", {
         "zoneID": zone_id(owner),
-        "atomic": True,
-        "operations": [{"operationType": "update", "record": {
+        "operations": [{"operationType": "delete", "record": {
             "recordType": rec.get("recordType", "Reminder"),
             "recordName": rn,
             "recordChangeTag": tag,
-            "fields": fields,
-            "parent": rec.get("parent"),
         }}],
     })
-    print(f"Completed: {rn}")
+    print(f"Deleted: {bare_id(rn)}")
 
 
 
