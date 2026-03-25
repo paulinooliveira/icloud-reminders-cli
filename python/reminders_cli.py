@@ -486,15 +486,28 @@ def cmd_add(args, api):
             die("No lists found")
         list_uuid = lists[0]["uuid"]
 
+    now_ms = int(time.time() * 1000)
+    now_apple = time.time() - 978307200
+    replica = str(uuid.uuid4()).upper()
+    touched = ["titleDocument", "completed", "list", "allDay", "flagged", "priority", "lastModifiedDate"]
+    rtm = {"map": {k: {"counter": 0, "modificationTime": now_apple, "replicaID": replica} for k in touched}}
+
     fields = {
-        "TitleDocument": {"value": encode_title(args.title)},
-        "Completed":     {"value": 0},
-        "List":          {"value": {"recordName": f"List/{list_uuid}", "action": "NONE"}, "type": "REFERENCE"},
+        "TitleDocument":    {"value": encode_title(args.title)},
+        "Completed":        {"value": 0},
+        "Deleted":          {"value": 0},
+        "Flagged":          {"value": 0},
+        "AllDay":           {"value": 0},
+        "Imported":         {"value": 0},
+        "Priority":         {"value": PRIORITY_MAP.get(args.priority, 0) if args.priority else 0},
+        "List":             {"value": {"recordName": f"List/{list_uuid}", "action": "VALIDATE"}, "type": "REFERENCE"},
+        "LastModifiedDate": {"value": now_ms, "type": "TIMESTAMP"},
+        "ResolutionTokenMap": {"value": json.dumps(rtm), "type": "STRING"},
     }
-    if args.priority:
-        fields["Priority"] = {"value": PRIORITY_MAP.get(args.priority, 0)}
     if args.notes:
         fields["NotesDocument"] = {"value": encode_title(args.notes)}
+        rtm["map"]["notesDocument"] = {"counter": 0, "modificationTime": now_apple, "replicaID": replica}
+        fields["ResolutionTokenMap"] = {"value": json.dumps(rtm), "type": "STRING"}
     if args.due:
         try:
             fmt = "%Y-%m-%dT%H:%M" if "T" in args.due else "%Y-%m-%d"
@@ -504,6 +517,7 @@ def cmd_add(args, api):
             die(f"Invalid date: {e}")
 
     rec_name = str(uuid.uuid4()).upper()
+    list_ref = f"List/{list_uuid}"
     resp = ck_post(api, "records/modify", {
         "zoneID": zone_id(owner),
         "atomic": True,
@@ -511,6 +525,7 @@ def cmd_add(args, api):
             "recordType": "Reminder",
             "recordName": rec_name,
             "fields": fields,
+            "parent": {"recordName": list_ref},
         }}],
     })
     saved = bare_id(resp.get("records", [{}])[0].get("recordName", rec_name))
