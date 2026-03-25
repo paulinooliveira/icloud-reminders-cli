@@ -280,10 +280,7 @@ def encode_title(text, doc_uuid=None):
     outer  = _field(1, 0, 0)
     outer += _field(2, 2, document)
 
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        gz.write(outer)
-    return base64.b64encode(buf.getvalue()).decode()
+    return base64.b64encode(zlib.compress(outer)).decode()
 
 def extract_title(td_b64):
     """Decode a base64-gzip CRDT TitleDocument to plain text."""
@@ -293,6 +290,8 @@ def extract_title(td_b64):
         raw = base64.b64decode(td_b64)
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
+        elif raw[0] == 0x78:
+            raw = zlib.decompress(raw)
         # outer -> field 2 (document) -> field 3 (note) -> field 2 (text bytes)
         docs = _extract_ld_fields(raw, 2)
         if docs:
