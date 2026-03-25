@@ -125,12 +125,8 @@ var queueDeleteCmd = &cobra.Command{
 					return mutationOutcome{}, fmt.Errorf("queue key %q has no stable cloud id and no bridge access", key)
 				}
 				if cloudID != "" {
-					result, err := w.DeleteReminder(cloudID)
-					if err != nil {
+					if err := deleteCloudRecordStrict(cloudID); err != nil {
 						return mutationOutcome{}, err
-					}
-					if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-						return mutationOutcome{}, fmt.Errorf("%s", errMsg)
 					}
 				}
 				if bridge != nil && cloudID == "" {

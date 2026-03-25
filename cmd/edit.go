@@ -128,7 +128,11 @@ Examples:
 			if changes.Title == nil && changes.DueDate == nil && changes.Notes == nil && changes.Priority == nil && changes.Completed == nil && changes.Flagged == nil && changes.HashtagIDs == nil && changes.ParentRef == nil {
 				return mutationOutcome{}, nil
 			}
-			result, err := w.EditReminder(reminderID, changes)
+			editFn := w.EditReminderNoVisibleRepair
+			if unsafeTextEdit {
+				editFn = w.EditReminder
+			}
+			result, err := editFn(reminderID, changes)
 			if err != nil {
 				return mutationOutcome{}, err
 			}
@@ -172,7 +176,7 @@ func init() {
 	editCmd.Flags().StringVar(&editParent, "parent", "", "New parent reminder id")
 	editCmd.Flags().BoolVar(&editFlagged, "flagged", false, "Mark the reminder flagged")
 	editCmd.Flags().BoolVar(&editUnflagged, "unflagged", false, "Clear the reminder flagged state")
-	editCmd.Flags().BoolVar(&unsafeTextEdit, "unsafe-text-edit", false, "Deprecated debug flag; normal title/note edits use the CloudKit-safe path")
+	editCmd.Flags().BoolVar(&unsafeTextEdit, "unsafe-text-edit", false, "Use legacy visible-text repair path for title/notes")
 	editCmd.Flags().BoolVar(&clearDue, "clear-due", false, "Clear the due date")
 	editCmd.Flags().BoolVar(&clearNotes, "clear-notes", false, "Clear the notes")
 	editCmd.Flags().BoolVar(&clearParent, "clear-parent", false, "Clear the parent reminder")

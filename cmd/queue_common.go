@@ -25,6 +25,15 @@ type queueReconcileResult struct {
 	Rewritten bool
 }
 
+var queueDeleteRetryBackoff = []time.Duration{
+	0,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	1500 * time.Millisecond,
+	2 * time.Second,
+}
+
 func canProceedWithoutQueueSync(stateItem queue.StateItem) bool {
 	// Queue upserts are allowed to proceed without a prior sync as long as we
 	// have a stable identifier (cloud id or apple id). This keeps the system
@@ -222,7 +231,7 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 			}
 		}
 		if needsEdit {
-			if _, err := w.EditReminder(cloudID, changes); err != nil {
+			if _, err := w.EditReminderNoVisibleRepair(cloudID, changes); err != nil {
 				return queueReconcileResult{}, err
 			}
 		}
@@ -388,7 +397,7 @@ func recreateQueueReminderTree(oldCloudID, listID string, spec queue.Spec, prior
 	newAppleID := "x-apple-reminder://" + shortReminderID(newCloudID)
 
 	if spec.Flagged != nil && *spec.Flagged {
-		if _, err := w.EditReminder(newCloudID, writer.ReminderChanges{Flagged: spec.Flagged}); err != nil {
+		if _, err := w.EditReminderNoVisibleRepair(newCloudID, writer.ReminderChanges{Flagged: spec.Flagged}); err != nil {
 			return "", "", nil, err
 		}
 	}
@@ -413,7 +422,7 @@ func recreateQueueReminderTree(oldCloudID, listID string, spec queue.Spec, prior
 			}
 			if child.Flagged {
 				flagged := true
-				if _, err := w.EditReminder(childCloudID, writer.ReminderChanges{Flagged: &flagged}); err != nil {
+				if _, err := w.EditReminderNoVisibleRepair(childCloudID, writer.ReminderChanges{Flagged: &flagged}); err != nil {
 					return "", "", nil, err
 				}
 			}
@@ -438,6 +447,9 @@ func recreateQueueReminderTree(oldCloudID, listID string, spec queue.Spec, prior
 func deleteCloudChildrenForParent(parentIDHint string) error {
 	if strings.TrimSpace(parentIDHint) == "" {
 		return nil
+	}
+	if err := syncEngine.Sync(false); err != nil {
+		return err
 	}
 	parentID := syncEngine.FindReminderByID(shortReminderID(parentIDHint))
 	if parentID == "" {
@@ -465,14 +477,7 @@ func deleteCloudIDIfPresent(id string) error {
 	if candidate == "" {
 		candidate = id
 	}
-	result, err := w.DeleteReminder(candidate)
-	if err != nil {
-		return err
-	}
-	if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-		return fmt.Errorf("%s", errMsg)
-	}
-	return nil
+	return deleteCloudRecordStrict(candidate)
 }
 
 func deleteCloudRecordStrict(id string) error {
@@ -480,18 +485,28 @@ func deleteCloudRecordStrict(id string) error {
 		return nil
 	}
 	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt, delay := range queueDeleteRetryBackoff {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 		result, err := w.DeleteReminder(id)
 		if err != nil {
 			return err
 		}
 		if v, ok := result["error"]; ok {
-			msg := fmt.Sprintf("%v", v)
+			msg := strings.ToLower(fmt.Sprintf("%v", v))
 			lastErr = fmt.Errorf("%s", msg)
 			// CloudKit can transiently refuse deletes while records are locked/settling.
-			if strings.Contains(msg, "OP_LOCK_FAILURE") || strings.Contains(strings.ToLower(msg), "oplock") {
-				_ = syncEngine.Sync(false)
-				time.Sleep(time.Duration(attempt+1) * 250 * time.Millisecond)
+			if isRetryableCloudDeleteError(msg) && attempt < len(queueDeleteRetryBackoff)-1 {
+				if syncEngine != nil {
+					_ = syncEngine.Sync(false)
+				}
+				continue
+			}
+			if isRecoverableDeleteTagError(msg) && syncEngine != nil && attempt < len(queueDeleteRetryBackoff)-1 {
+				if syncErr := syncEngine.Sync(false); syncErr != nil {
+					return fmt.Errorf("%s; sync failed: %w", msg, syncErr)
+				}
 				continue
 			}
 			return lastErr
@@ -505,6 +520,23 @@ func deleteCloudRecordStrict(id string) error {
 		return lastErr
 	}
 	return fmt.Errorf("delete failed for %s", id)
+}
+
+func isRetryableCloudError(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(msg, "zone_busy") ||
+		strings.Contains(msg, "op_lock_failure") ||
+		strings.Contains(msg, "oplock") ||
+		strings.Contains(msg, "server_overloaded")
+}
+
+func isRecoverableDeleteTagError(msg string) bool {
+	msg = strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(msg, "missing change tag")
+}
+
+func isRetryableCloudDeleteError(msg string) bool {
+	return isRetryableCloudError(msg)
 }
 
 func chooseCanonicalCloudMatch(matches []*models.Reminder, preferredCloudID string) *models.Reminder {

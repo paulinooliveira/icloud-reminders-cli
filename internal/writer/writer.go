@@ -44,6 +44,13 @@ type timedDueArtifacts struct {
 }
 
 var deleteVerifyBackoff = []time.Duration{0, 150 * time.Millisecond, 400 * time.Millisecond}
+var mutationRetryBackoff = []time.Duration{
+	0,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+}
 
 // New creates a new Writer.
 func New(ck *cloudkit.Client, engine *sync.Engine) *Writer {
@@ -622,7 +629,10 @@ func (w *Writer) EditReminder(reminderID string, changes ReminderChanges) (map[s
 // "visible text repair" step. This avoids unsafe CRDT mutation paths when running
 // in headless or non-Mac environments.
 func (w *Writer) EditReminderNoVisibleRepair(reminderID string, changes ReminderChanges) (map[string]interface{}, error) {
-	return w.editReminderInternal(reminderID, changes, false)
+	if changes.Title == nil && changes.Notes == nil {
+		return w.editReminderInternal(reminderID, changes, false)
+	}
+	return w.editReminderSafeRecreate(reminderID, changes)
 }
 
 func (w *Writer) editReminderInternal(reminderID string, changes ReminderChanges, repairVisible bool) (map[string]interface{}, error) {
@@ -702,6 +712,211 @@ func (w *Writer) editReminderInternal(reminderID string, changes ReminderChanges
 	}
 	logger.Infof("Edited reminder: %q (%s)", rd.Title, reminderID)
 	return result, nil
+}
+
+func (w *Writer) editReminderSafeRecreate(reminderID string, changes ReminderChanges) (map[string]interface{}, error) {
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return errResult(err), nil
+	}
+
+	fullID, rd, err := w.resolveReminderRecord(reminderID)
+	if err != nil {
+		return errResult(fmt.Errorf("reminder '%s' not found", reminderID)), nil
+	}
+	if rd == nil {
+		return errResult(fmt.Errorf("failed to resolve reminder '%s'", reminderID)), nil
+	}
+	if rd.ListRef == nil || strings.TrimSpace(*rd.ListRef) == "" {
+		return errResult(fmt.Errorf("reminder '%s' has no resolved list", reminderID)), nil
+	}
+
+	listID := *rd.ListRef
+	title := rd.Title
+	if changes.Title != nil {
+		title = strings.TrimSpace(*changes.Title)
+		if title == "" {
+			return errResult(fmt.Errorf("title cannot be empty")), nil
+		}
+	}
+
+	due := rd.Due
+	if changes.DueDate != nil {
+		if strings.TrimSpace(*changes.DueDate) == "" {
+			due = nil
+		} else {
+			due = changes.DueDate
+		}
+	}
+	dueText := ""
+	if due != nil {
+		dueText = strings.TrimSpace(*due)
+	}
+
+	notes := rd.Notes
+	if changes.Notes != nil {
+		if strings.TrimSpace(*changes.Notes) == "" {
+			notes = nil
+		} else {
+			n := strings.TrimSpace(*changes.Notes)
+			notes = &n
+		}
+	}
+	notesText := ""
+	if notes != nil {
+		notesText = strings.TrimSpace(*notes)
+	}
+
+	priority := rd.Priority
+	if changes.Priority != nil {
+		priority = *changes.Priority
+	}
+	parentRef := ""
+	if changes.ParentRef != nil {
+		parentRef = *changes.ParentRef
+	} else if rd.ParentRef != nil {
+		parentRef = *rd.ParentRef
+	}
+
+	sectionID, sectionLookupErr := w.sectionIDForReminder(ownerID, listID, shortID(fullID))
+	if sectionLookupErr != nil {
+		logger.Warnf("recreate edit: section lookup failed for %s: %v", fullID, sectionLookupErr)
+		sectionID = ""
+	}
+
+	recreateResult, err := w.AddReminder(title, listID, dueText, priorityLabelFromValue(priority), notesText, parentRef)
+	if err != nil {
+		return errResult(err), nil
+	}
+	if recreateErr, ok := recreateResult["error"].(string); ok && recreateErr != "" {
+		return recreateResult, nil
+	}
+	newID, _ := recreateResult["id"].(string)
+	if strings.TrimSpace(newID) == "" {
+		return errResult(fmt.Errorf("reminder text-recreate did not return a new id")), nil
+	}
+
+	cleanupNew := func(ctxErr error) (map[string]interface{}, error) {
+		if _, deleteErr := w.DeleteReminder(newID); deleteErr != nil {
+			return nil, fmt.Errorf("failed to clean up replacement reminder %s: %w", newID, deleteErr)
+		}
+		if ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
+	}
+
+	remaining := ReminderChanges{}
+	remainingNeeded := false
+	if changes.Completed != nil {
+		remaining.Completed = changes.Completed
+		remainingNeeded = true
+	}
+	if changes.Flagged != nil {
+		remaining.Flagged = changes.Flagged
+		remainingNeeded = true
+	}
+	if changes.HashtagIDs != nil {
+		remaining.HashtagIDs = changes.HashtagIDs
+		remainingNeeded = true
+	}
+	if changes.ParentRef != nil {
+		parentResolved := strings.TrimSpace(parentRef)
+		if parentResolved == "" {
+			none := ""
+			remaining.ParentRef = &none
+		} else {
+			remaining.ParentRef = &parentResolved
+		}
+		remainingNeeded = true
+	}
+
+	if remainingNeeded {
+		remainingResult, editErr := w.editReminderInternal(newID, remaining, false)
+		if editErr != nil {
+			if _, cleanErr := cleanupNew(editErr); cleanErr != nil {
+				return errResult(cleanErr), nil
+			}
+			return errResult(editErr), nil
+		}
+		if remainErrMsg, ok := remainingResult["error"].(string); ok && remainErrMsg != "" {
+			if _, cleanErr := cleanupNew(fmt.Errorf("reminder update during recreate failed: %s", remainErrMsg)); cleanErr != nil {
+				return errResult(cleanErr), nil
+			}
+			return errResult(fmt.Errorf("reminder update during recreate failed: %s", remainErrMsg)), nil
+		}
+	}
+
+	if changes.HashtagIDs != nil {
+		tagResult, tagErr := w.SetReminderTags(newID, *changes.HashtagIDs)
+		if tagErr != nil {
+			if _, cleanErr := cleanupNew(tagErr); cleanErr != nil {
+				return errResult(cleanErr), nil
+			}
+			return errResult(tagErr), nil
+		}
+		if tagMsg, ok := tagResult["error"].(string); ok && tagMsg != "" {
+			if _, cleanErr := cleanupNew(fmt.Errorf("reminder tags during recreate failed: %s", tagMsg)); cleanErr != nil {
+				return errResult(cleanErr), nil
+			}
+			return errResult(fmt.Errorf("reminder tags during recreate failed: %s", tagMsg)), nil
+		}
+	}
+
+	if sectionID != "" {
+		if err := w.applySectionMembership(ownerID, listID, sectionID, []string{shortID(newID)}, false); err != nil {
+			if _, cleanErr := cleanupNew(err); cleanErr != nil {
+				return errResult(cleanErr), nil
+			}
+			return errResult(err), nil
+		}
+	}
+
+	if sameReminderID(newID, fullID) {
+		if recreateResult != nil {
+			recreateResult["id"] = newID
+		}
+		return recreateResult, nil
+	}
+	deleteResult, deleteErr := w.DeleteReminder(fullID)
+	if deleteErr != nil {
+		if _, cleanErr := cleanupNew(deleteErr); cleanErr != nil {
+			return errResult(cleanErr), nil
+		}
+		return deleteResult, nil
+	}
+	if errMsg, ok := deleteResult["error"].(string); ok && errMsg != "" {
+		if _, cleanErr := cleanupNew(fmt.Errorf("delete old reminder %s failed: %s", fullID, errMsg)); cleanErr != nil {
+			return errResult(cleanErr), nil
+		}
+		return errResult(fmt.Errorf("delete old reminder %s failed: %s", fullID, errMsg)), nil
+	}
+
+	if recreateResult != nil {
+		delete(recreateResult, "existing")
+		recreateResult["id"] = newID
+		recreateResult["previous_id"] = fullID
+	}
+	return recreateResult, nil
+}
+
+func priorityLabelFromValue(value int) string {
+	switch value {
+	case 1:
+		return "high"
+	case 5:
+		return "medium"
+	case 9:
+		return "low"
+	case 0:
+		return ""
+	default:
+		return ""
+	}
+}
+
+func sameReminderID(a, b string) bool {
+	return strings.EqualFold(shortID(a), shortID(b))
 }
 
 func (w *Writer) SafeTextEditReminder(reminderID string, title, notes *string, bridge *applebridge.Bridge) (map[string]interface{}, error) {
@@ -1554,36 +1769,31 @@ func boolToInt(v bool) int {
 
 func (w *Writer) modifyRecordsWithRetry(ownerID string, operations []map[string]interface{}) (map[string]interface{}, error) {
 	var lastErr error
-	backoffs := []time.Duration{
-		0,
-		500 * time.Millisecond,
-		1500 * time.Millisecond,
-		3 * time.Second,
-		6 * time.Second,
-		10 * time.Second,
-	}
-	for attempt, delay := range backoffs {
+	for attempt, delay := range mutationRetryBackoff {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
 		result, err := w.CK.ModifyRecords(ownerID, operations)
 		if err != nil {
 			lastErr = err
-			if isZoneBusy(err) && attempt < len(backoffs)-1 {
+			if isZoneBusy(err) && attempt < len(mutationRetryBackoff)-1 {
 				continue
 			}
 			return result, err
 		}
 		if recErr := checkRecordErrors(result); recErr != nil {
 			lastErr = recErr
-			if isZoneBusy(recErr) && attempt < len(backoffs)-1 {
+			if isZoneBusy(recErr) && attempt < len(mutationRetryBackoff)-1 {
 				continue
 			}
 			return result, recErr
 		}
 		return result, nil
 	}
-	return nil, lastErr
+	if lastErr != nil {
+		return nil, fmt.Errorf("modify records failed after %d attempts: %w", len(mutationRetryBackoff), lastErr)
+	}
+	return nil, fmt.Errorf("modify records failed after %d attempts", len(mutationRetryBackoff))
 }
 
 // checkRecordErrors extracts the first record-level error from CloudKit result.
