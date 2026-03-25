@@ -50,7 +50,11 @@ _MIGRATIONS = [
     """CREATE TABLE IF NOT EXISTS queue_bindings (
         session_key TEXT PRIMARY KEY, queue_key TEXT NOT NULL,
         FOREIGN KEY (queue_key) REFERENCES queue_items(queue_key) ON DELETE CASCADE)""",
-    """CREATE TABLE IF NOT EXISTS queue_leases (
+            """CREATE TABLE IF NOT EXISTS pending_deletes (
+            cloud_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS queue_leases (
         queue_key TEXT NOT NULL, session_key TEXT NOT NULL, agent_id TEXT,
         started_at TEXT NOT NULL, last_seen_at TEXT, model_name TEXT,
         token_count INTEGER NOT NULL DEFAULT 0,
@@ -213,6 +217,23 @@ class StateDB:
             self._conn.execute(
                 "INSERT INTO kv_state (key, value) VALUES (?, ?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def add_pending_delete(self, cloud_id):
+        if not cloud_id: return
+        with self._lock():
+            self._conn.execute(
+                "INSERT OR IGNORE INTO pending_deletes (cloud_id) VALUES (?)",
+                (cloud_id,))
+            self._conn.commit()
+
+    def list_pending_deletes(self):
+        rows = self._conn.execute("SELECT cloud_id FROM pending_deletes").fetchall()
+        return [r[0] for r in rows]
+
+    def clear_pending_delete(self, cloud_id):
+        with self._lock():
+            self._conn.execute("DELETE FROM pending_deletes WHERE cloud_id=?", (cloud_id,))
+            self._conn.commit()
 
     def close(self):
         self._conn.close()

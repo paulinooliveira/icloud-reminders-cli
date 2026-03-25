@@ -1022,12 +1022,24 @@ def cmd_queue_state_json(args, api):
 
 
 def cmd_queue_complete(args, api):
+    db = _StateDB(str(_DB_PATH))
+    adapter = _StateDBAdapter(db)
+    raw = adapter.get_queue_item(args.key)
+    cloud_id = raw.get("cloud_id", "") if raw else ""
+    if cloud_id:
+        db.add_pending_delete(cloud_id)
     mgr, _ = _make_mgr_local(args)
     mgr.close(args.key, complete=True)
     print(f"completed: {args.key}")
 
 
 def cmd_queue_delete(args, api):
+    db = _StateDB(str(_DB_PATH))
+    adapter = _StateDBAdapter(db)
+    raw = adapter.get_queue_item(args.key)
+    cloud_id = raw.get("cloud_id", "") if raw else ""
+    if cloud_id:
+        db.add_pending_delete(cloud_id)
     mgr, _ = _make_mgr_local(args)
     mgr.close(args.key, complete=False)
     print(f"deleted: {args.key}")
@@ -1069,13 +1081,19 @@ def cmd_queue_refresh(args, api):
 
 
 def cmd_queue_sync(args, api):
-    """Push all queue items to Apple Reminders."""
+    """Push all queue items to Apple Reminders + process pending deletes.
+    
+    Fully self-contained: handles retries, throttling, creates, updates,
+    and deletes. Designed to run unattended on heartbeat/cron.
+    Models never call this directly.
+    """
     owner = get_owner(api)
     list_name = getattr(args, "list", None) or "Sebastian"
     db = _StateDBAdapter(_StateDB(str(_DB_PATH)))
     rem_api = _RemindersAPI(api, owner, list_name)
     items = db.list_queue_items()
-    synced = 0
+
+    created, updated, failed = 0, 0, 0
     for raw in items:
         item = _deserialize_item(raw)
         notes = render_notes(item)
@@ -1089,15 +1107,54 @@ def cmd_queue_sync(args, api):
                 cloud_id = result.get("cloud_id") or result.get("guid")
                 if cloud_id:
                     db._db.upsert_queue_item(item.key, item.title, cloud_id=cloud_id)
-                    print(f"  created: {item.key} -> {cloud_id}")
+                created += 1
             else:
                 rem_api.edit_reminder(item.cloud_id, title=title, notes=notes,
                     priority=item.priority, flagged=item.flagged)
-                print(f"  synced: {item.key} ({item.cloud_id})")
-            synced += 1
+                updated += 1
         except Exception as e:
-            print(f"  FAILED: {item.key}: {e}", file=sys.stderr)
-    print(f"Synced {synced}/{len(items)} items")
+            err(f"  sync failed: {item.key}: {e}")
+            failed += 1
+
+    # Process pending deletes
+    raw_db = _StateDB(str(_DB_PATH))
+    pending = raw_db.list_pending_deletes()
+    deleted = 0
+    for cloud_id in pending:
+        try:
+            rec = find_reminder_by_id(api, owner, cloud_id)
+            tag = rec.get("recordChangeTag")
+            rn = rec.get("recordName")
+            existing = rec.get("fields", {})
+            rtm = _bump_resolution_map(existing, ["titleDocument", "deleted", "completed", "lastModifiedDate"])
+            ck_post(api, "records/modify", {
+                "zoneID": zone_id(owner),
+                "operations": [{"operationType": "update", "record": {
+                    "recordType": "Reminder", "recordName": rn, "recordChangeTag": tag,
+                    "fields": {
+                        "Deleted": {"value": 1}, "Completed": {"value": 1},
+                        "TitleDocument": {"value": encode_title("")},
+                        "LastModifiedDate": {"value": int(time.time() * 1000), "type": "TIMESTAMP"},
+                        "ResolutionTokenMap": {"value": rtm, "type": "STRING"},
+                    },
+                    "parent": rec.get("parent"),
+                }}],
+            })
+            raw_db.clear_pending_delete(cloud_id)
+            deleted += 1
+        except Exception as e:
+            err(f"  delete failed: {bare_id(cloud_id)}: {e}")
+
+    total = created + updated + deleted
+    if total or failed:
+        parts = []
+        if created: parts.append(f"{created} created")
+        if updated: parts.append(f"{updated} updated")
+        if deleted: parts.append(f"{deleted} deleted")
+        if failed: parts.append(f"{failed} failed")
+        print(f"queue-sync: {', '.join(parts)}")
+    else:
+        print("queue-sync: nothing to do")
 
 
 def cmd_queue_audit(args, api):
