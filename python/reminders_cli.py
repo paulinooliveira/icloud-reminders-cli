@@ -656,15 +656,18 @@ def cmd_delete(args, api):
     tag    = rec.get("recordChangeTag")
     rn     = rec.get("recordName")
 
-    # Soft delete: set Deleted=1 via update (not operationType "delete").
-    # Hard deletes cause the Mac's native Reminders to re-push the record.
+    # Soft delete: set Deleted=1 + empty title via update.
+    # Hard deletes cause the Mac to re-push. Empty title triggers native cleanup.
     ck_post(api, "records/modify", {
         "zoneID": zone_id(owner),
         "operations": [{"operationType": "update", "record": {
             "recordType": rec.get("recordType", "Reminder"),
             "recordName": rn,
             "recordChangeTag": tag,
-            "fields": {"Deleted": {"value": 1}},
+            "fields": {
+                "Deleted": {"value": 1},
+                "TitleDocument": {"value": encode_title("")},
+            },
             "parent": rec.get("parent"),
         }}],
     })
