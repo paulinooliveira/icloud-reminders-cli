@@ -38,7 +38,7 @@ func TestSaveAndLoadRoundTripViaSQLite(t *testing.T) {
 	tok := "tok-123"
 	c.SyncToken = &tok
 
-	if err := c.Save(); err != nil {
+	if err := c.FlushAll(); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 

@@ -61,7 +61,7 @@ func (e *Engine) Sync(force bool) error {
 func (e *Engine) doSync(force bool) error {
 	defer logger.Timer("sync")()
 	if force {
-		e.Cache = cache.NewCache()
+		e.Cache = cache.NewCacheWithDB(e.Cache.DB())
 		logger.Info("Full sync (forced)...")
 	} else if e.Cache.SyncToken != nil && *e.Cache.SyncToken != "" {
 		logger.Info("Delta sync...")
@@ -81,6 +81,8 @@ func (e *Engine) doSync(force bool) error {
 
 	page := 0
 	total := 0
+	consecEmptyPages := 0
+	const maxPages = 500
 
 	for {
 		page++
@@ -109,16 +111,42 @@ func (e *Engine) doSync(force bool) error {
 
 		e.processRecords(records)
 
+		prevToken := ""
+		if e.Cache.SyncToken != nil {
+			prevToken = *e.Cache.SyncToken
+		}
 		if newToken != "" {
 			e.Cache.SyncToken = &newToken
 		}
 		if !moreComing {
 			break
 		}
+		// Guard against infinite CloudKit loops.
+		if len(records) == 0 {
+			consecEmptyPages++
+		} else {
+			consecEmptyPages = 0
+		}
+		if newToken == prevToken || consecEmptyPages >= 3 || page >= maxPages {
+			if consecEmptyPages >= 3 {
+				logger.Warnf("sync: %d consecutive empty pages, stopping at page %d", consecEmptyPages, page)
+			} else if page >= maxPages {
+				logger.Warnf("sync: reached max page limit (%d), stopping", maxPages)
+			} else {
+				logger.Warnf("sync: token unchanged on page %d, stopping", page)
+			}
+			break
+		}
 	}
 
-	if err := e.Cache.Save(); err != nil {
-		return fmt.Errorf("save cache: %w", err)
+	var flushErr error
+	if force {
+		flushErr = e.Cache.FlushAllFull()
+	} else {
+		flushErr = e.Cache.FlushAll()
+	}
+	if flushErr != nil {
+		return fmt.Errorf("save cache: %w", flushErr)
 	}
 
 	active := 0
@@ -224,7 +252,7 @@ func (e *Engine) processRecords(records []interface{}) {
 					delete(e.Cache.Reminders, alias)
 				}
 			} else {
-				existing := e.Cache.Reminders[rname]
+				existing := e.Cache.GetReminder(rname)
 				rd := &cache.ReminderData{}
 				if existing != nil {
 					*rd = *existing
@@ -304,7 +332,16 @@ func (e *Engine) processRecords(records []interface{}) {
 				if changeTag != "" {
 					rd.ChangeTag = &changeTag
 				}
-				e.Cache.Reminders[rname] = rd
+				ckey := cache.CanonicalReminderKey(rname)
+				if ckey == "" {
+					logger.Warnf("sync: skipping non-canonical reminder name %q", rname)
+					continue
+				}
+				// Clean up any stale bare-UUID alias.
+				if ckey != rname {
+					delete(e.Cache.Reminders, rname)
+				}
+				e.Cache.Reminders[ckey] = rd
 			}
 		}
 	}
@@ -314,6 +351,10 @@ func (e *Engine) processRecords(records []interface{}) {
 func (e *Engine) GetReminders(includeCompleted bool) []*models.Reminder {
 	var result []*models.Reminder
 	for rid, data := range e.Cache.Reminders {
+		// Skip bare-UUID entries — only canonical Reminder/UUID keys are authoritative.
+		if !strings.HasPrefix(rid, "Reminder/") {
+			continue
+		}
 		if !includeCompleted && data.Completed {
 			continue
 		}

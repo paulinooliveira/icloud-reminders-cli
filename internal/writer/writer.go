@@ -202,8 +202,8 @@ func (w *Writer) AddReminder(title, listName, dueDate, priority, notes, parentID
 		}
 	}
 	w.Sync.Cache.Reminders[recordName] = rd
-	if err := w.Sync.Cache.Save(); err != nil {
-		logger.Warnf("cache save failed: %v", err)
+	if err := w.Sync.Cache.PersistReminder(recordName, rd); err != nil {
+		logger.Warnf("cache persist failed: %v", err)
 	}
 
 	result["id"] = recordName
@@ -314,8 +314,8 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 		// gone, converge by cleaning any local cache aliases and returning success.
 		if isReminderIDHint(reminderID) {
 			w.deleteReminderCacheAliases(reminderID)
-			if err := w.Sync.Cache.Save(); err != nil {
-				logger.Warnf("cache save failed: %v", err)
+			if err := w.Sync.Cache.DeletePersistedReminder(reminderID); err != nil {
+				logger.Warnf("cache delete failed: %v", err)
 			}
 			return map[string]interface{}{"missing": true, "id": reminderID}, nil
 		}
@@ -333,8 +333,8 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 			for _, alias := range cache.ReminderAliases(fullID) {
 				delete(w.Sync.Cache.Reminders, alias)
 			}
-			if err := w.Sync.Cache.Save(); err != nil {
-				logger.Warnf("cache save failed: %v", err)
+			if err := w.Sync.Cache.DeletePersistedReminder(fullID); err != nil {
+				logger.Warnf("cache delete failed: %v", err)
 			}
 			return map[string]interface{}{"missing": true, "id": fullID}, nil
 		}
@@ -388,8 +388,8 @@ func (w *Writer) DeleteReminder(reminderID string) (map[string]interface{}, erro
 			for _, alias := range cache.ReminderAliases(fullID) {
 				delete(w.Sync.Cache.Reminders, alias)
 			}
-			if err := w.Sync.Cache.Save(); err != nil {
-				logger.Warnf("cache save failed: %v", err)
+			if err := w.Sync.Cache.DeletePersistedReminder(fullID); err != nil {
+				logger.Warnf("cache delete failed: %v", err)
 			}
 			logger.Infof("Deleted reminder: %q (%s)", title, reminderID)
 			return result, nil
@@ -702,8 +702,8 @@ func (w *Writer) editReminderInternal(reminderID string, changes ReminderChanges
 	}
 	now := time.Now().UnixMilli()
 	rd.ModifiedTS = &now
-	if err := w.Sync.Cache.Save(); err != nil {
-		logger.Warnf("cache save failed: %v", err)
+	if err := w.Sync.Cache.PersistReminder(fullID, rd); err != nil {
+		logger.Warnf("cache persist failed: %v", err)
 	}
 	if repairVisible {
 		if err := w.repairVisibleTextState(fullID, rd, changes); err != nil {

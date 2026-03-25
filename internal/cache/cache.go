@@ -1,7 +1,14 @@
 // Package cache provides the in-process CloudKit metadata cache backed by the
-// shared SQLite store. It replaces the old ck_cache.json file and eliminates
-// the dual-cache key-form confusion by enforcing canonical "Reminder/UUID"
-// keys at the database CHECK-constraint level.
+// shared SQLite store. The in-memory maps are the source of truth within a
+// session; SQLite is the persistence layer.
+//
+// Write discipline:
+//   - After a full CloudKit sync, call FlushAll() once — it writes the whole
+//     map set in a single transaction.
+//   - After a single-record mutation (add/edit/delete), call PersistReminder,
+//     PersistList, etc. — one row, one upsert, no full-table scan.
+//   - Save() is kept for backward-compat but is a no-op; callers should be
+//     migrated to PersistReminder / FlushAll over time.
 package cache
 
 import (
@@ -131,9 +138,6 @@ type HashtagData struct {
 }
 
 // Cache is the in-process CloudKit metadata cache.
-// All map mutations are written through to SQLite via Save(); Load() hydrates
-// from SQLite. Direct map writes are still supported for backward compatibility
-// but callers should prefer SetReminder/GetReminder for reminders.
 type Cache struct {
 	Reminders map[string]*ReminderData
 	Sections  map[string]*SectionData
@@ -143,11 +147,10 @@ type Cache struct {
 	OwnerID   *string
 	UpdatedAt *string
 
-	db *sql.DB // nil in tests that don't call Load/NewCache
+	db *sql.DB
 }
 
 // NewCache returns an empty in-memory cache (no DB).
-// Used in tests and for a forced full-sync reset.
 func NewCache() *Cache {
 	return &Cache{
 		Reminders: make(map[string]*ReminderData),
@@ -157,7 +160,7 @@ func NewCache() *Cache {
 	}
 }
 
-// Load opens the SQLite store and hydrates the cache.
+// Load opens the SQLite store and hydrates the in-memory maps.
 func Load() *Cache {
 	db, err := store.Open()
 	if err != nil {
@@ -172,7 +175,6 @@ func Load() *Cache {
 		db:        db,
 	}
 
-	// sync state
 	if tok, err := store.GetCKSyncState(db, "sync_token"); err == nil && tok != "" {
 		c.SyncToken = &tok
 	}
@@ -180,134 +182,48 @@ func Load() *Cache {
 		c.OwnerID = &ownerID
 	}
 
-	// reminders
-	rows, err := store.ListCKReminders(db, true)
-	if err != nil {
+	if rows, err := store.ListCKReminders(db, true); err != nil {
 		logger.Warnf("cache: load reminders: %v", err)
-	}
-	for _, r := range rows {
-		c.Reminders[r.CloudID] = ckReminderToData(r)
+	} else {
+		for _, r := range rows {
+			c.Reminders[r.CloudID] = ckReminderToData(r)
+		}
 	}
 
-	// lists
-	lists, err := store.ListCKLists(db)
-	if err != nil {
+	if lists, err := store.ListCKLists(db); err != nil {
 		logger.Warnf("cache: load lists: %v", err)
 	} else {
 		c.Lists = lists
 	}
 
-	// sections
-	sections, err := store.ListCKSections(db)
-	if err != nil {
+	if sections, err := store.ListCKSections(db); err != nil {
 		logger.Warnf("cache: load sections: %v", err)
-	}
-	for id, s := range sections {
-		c.Sections[id] = &SectionData{
-			Name:          s.Name,
-			CanonicalName: s.CanonicalName,
-			ListRef:       s.ListRef,
-			ChangeTag:     s.ChangeTag,
+	} else {
+		for id, s := range sections {
+			c.Sections[id] = &SectionData{
+				Name: s.Name, CanonicalName: s.CanonicalName,
+				ListRef: s.ListRef, ChangeTag: s.ChangeTag,
+			}
 		}
 	}
 
-	// hashtags
-	hashtags, err := store.ListCKHashtags(db)
-	if err != nil {
+	if hashtags, err := store.ListCKHashtags(db); err != nil {
 		logger.Warnf("cache: load hashtags: %v", err)
-	}
-	for id, h := range hashtags {
-		c.Hashtags[id] = &HashtagData{
-			Name:        h.Name,
-			ReminderRef: h.ReminderRef,
-			ChangeTag:   h.ChangeTag,
+	} else {
+		for id, h := range hashtags {
+			c.Hashtags[id] = &HashtagData{
+				Name: h.Name, ReminderRef: h.ReminderRef, ChangeTag: h.ChangeTag,
+			}
 		}
 	}
 
-	// migrate any stale ck_cache.json (skip in test processes to avoid goroutine leaks)
 	if !isTestProcess() {
 		go migrateJSONCache(db)
 	}
-
 	return c
 }
 
-// Save persists the in-memory cache to SQLite.
-func (c *Cache) Save() error {
-	ownedDB := false
-	db := c.db
-	if db == nil {
-		var err error
-		db, err = store.Open()
-		if err != nil {
-			return fmt.Errorf("cache.Save: open store: %w", err)
-		}
-		ownedDB = true
-	}
-	if ownedDB {
-		defer db.Close()
-	}
-
-	now := time.Now().Format("2006-01-02T15:04:05")
-	c.UpdatedAt = &now
-
-	if c.SyncToken != nil {
-		if err := store.SetCKSyncState(db, "sync_token", *c.SyncToken); err != nil {
-			return fmt.Errorf("cache.Save sync_token: %w", err)
-		}
-	}
-	if c.OwnerID != nil {
-		if err := store.SetCKSyncState(db, "owner_id", *c.OwnerID); err != nil {
-			return fmt.Errorf("cache.Save owner_id: %w", err)
-		}
-	}
-
-	for id, rd := range c.Reminders {
-		ckey := CanonicalReminderKey(id)
-		if ckey == "" {
-			logger.Warnf("cache.Save: skipping non-canonical reminder key %q", id)
-			continue
-		}
-		if err := store.UpsertCKReminder(db, dataToStoreCKReminder(ckey, rd)); err != nil {
-			return fmt.Errorf("cache.Save reminder %s: %w", ckey, err)
-		}
-	}
-
-	for id, name := range c.Lists {
-		if err := store.UpsertCKList(db, id, name); err != nil {
-			return fmt.Errorf("cache.Save list %s: %w", id, err)
-		}
-	}
-
-	for id, s := range c.Sections {
-		if err := store.UpsertCKSection(db, store.CKSection{
-			SectionID:     id,
-			Name:          s.Name,
-			CanonicalName: s.CanonicalName,
-			ListRef:       s.ListRef,
-			ChangeTag:     s.ChangeTag,
-		}); err != nil {
-			return fmt.Errorf("cache.Save section %s: %w", id, err)
-		}
-	}
-
-	for id, h := range c.Hashtags {
-		if err := store.UpsertCKHashtag(db, store.CKHashtag{
-			HashtagID:   id,
-			Name:        h.Name,
-			ReminderRef: h.ReminderRef,
-			ChangeTag:   h.ChangeTag,
-		}); err != nil {
-			return fmt.Errorf("cache.Save hashtag %s: %w", id, err)
-		}
-	}
-
-	return nil
-}
-
-// GetReminder retrieves a reminder by any recognised ID form.
-// Close releases the underlying database connection held by this Cache.
-// Call this when the Cache is no longer needed (e.g. end of command).
+// Close releases the underlying DB connection.
 func (c *Cache) Close() {
 	if c.db != nil {
 		_ = c.db.Close()
@@ -315,13 +231,132 @@ func (c *Cache) Close() {
 	}
 }
 
+// Save is a no-op kept for backward compatibility.
+// Use PersistReminder for single-record mutations or FlushAll after a full sync.
+func (c *Cache) Save() error {
+	return nil
+}
+
+// FlushAll writes the entire in-memory cache to SQLite in a single transaction.
+// Call this once at the end of a full CloudKit sync, not after every record.
+func (c *Cache) FlushAll() error {
+	db, owned, err := c.getDB()
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer db.Close()
+	}
+
+	now := time.Now().Format("2006-01-02T15:04:05")
+	c.UpdatedAt = &now
+
+	return store.ExecTx(db, func(tx *sql.Tx) error {
+		if c.SyncToken != nil {
+			if _, err := tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('sync_token',?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, *c.SyncToken); err != nil {
+				return err
+			}
+		}
+		if c.OwnerID != nil {
+			if _, err := tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('owner_id',?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, *c.OwnerID); err != nil {
+				return err
+			}
+		}
+		for id, rd := range c.Reminders {
+			ckey := CanonicalReminderKey(id)
+			if ckey == "" {
+				logger.Warnf("cache.FlushAll: skipping non-canonical key %q", id)
+				continue
+			}
+			r := dataToStoreCKReminder(ckey, rd)
+			if _, err := tx.Exec(`INSERT INTO ck_reminders
+				(cloud_id,title,completed,flagged,priority,due,notes,list_ref,parent_ref,
+				 hashtag_ids,change_tag,modified_ts,completion_date)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+				ON CONFLICT(cloud_id) DO UPDATE SET
+				title=excluded.title,completed=excluded.completed,flagged=excluded.flagged,
+				priority=excluded.priority,due=excluded.due,notes=excluded.notes,
+				list_ref=excluded.list_ref,parent_ref=excluded.parent_ref,
+				hashtag_ids=excluded.hashtag_ids,change_tag=excluded.change_tag,
+				modified_ts=excluded.modified_ts,completion_date=excluded.completion_date`,
+				r.CloudID, r.Title, boolInt(r.Completed), boolInt(r.Flagged), r.Priority,
+				r.Due, r.Notes, r.ListRef, r.ParentRef, r.HashtagIDs,
+				r.ChangeTag, r.ModifiedTS, r.CompletionDate); err != nil {
+				return fmt.Errorf("flush reminder %s: %w", ckey, err)
+			}
+		}
+		for id, name := range c.Lists {
+			if _, err := tx.Exec(`INSERT INTO ck_lists (list_id,name) VALUES(?,?)
+				ON CONFLICT(list_id) DO UPDATE SET name=excluded.name`, id, name); err != nil {
+				return err
+			}
+		}
+		for id, s := range c.Sections {
+			if _, err := tx.Exec(`INSERT INTO ck_sections
+				(section_id,name,canonical_name,list_ref,change_tag) VALUES(?,?,?,?,?)
+				ON CONFLICT(section_id) DO UPDATE SET name=excluded.name,
+				canonical_name=excluded.canonical_name,list_ref=excluded.list_ref,
+				change_tag=excluded.change_tag`,
+				id, s.Name, s.CanonicalName, s.ListRef, s.ChangeTag); err != nil {
+				return err
+			}
+		}
+		for id, h := range c.Hashtags {
+			if _, err := tx.Exec(`INSERT INTO ck_hashtags
+				(hashtag_id,name,reminder_ref,change_tag) VALUES(?,?,?,?)
+				ON CONFLICT(hashtag_id) DO UPDATE SET name=excluded.name,
+				reminder_ref=excluded.reminder_ref,change_tag=excluded.change_tag`,
+				id, h.Name, h.ReminderRef, h.ChangeTag); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PersistReminder writes a single reminder to SQLite immediately.
+// Use this after add/edit/delete mutations instead of Save().
+func (c *Cache) PersistReminder(id string, rd *ReminderData) error {
+	ckey := CanonicalReminderKey(id)
+	if ckey == "" {
+		return fmt.Errorf("cache.PersistReminder: %q is not a valid reminder ID", id)
+	}
+	db, owned, err := c.getDB()
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer db.Close()
+	}
+	return store.UpsertCKReminder(db, dataToStoreCKReminder(ckey, rd))
+}
+
+// DeletePersistedReminder removes a reminder from SQLite by canonical key.
+func (c *Cache) DeletePersistedReminder(id string) error {
+	ckey := CanonicalReminderKey(id)
+	if ckey == "" {
+		// not a canonical ID — nothing to delete from DB
+		return nil
+	}
+	db, owned, err := c.getDB()
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer db.Close()
+	}
+	return store.DeleteCKReminder(db, ckey)
+}
+
+// GetReminder retrieves a reminder by any recognised ID form.
 func (c *Cache) GetReminder(id string) *ReminderData {
 	if ckey := CanonicalReminderKey(id); ckey != "" {
 		if rd, ok := c.Reminders[ckey]; ok {
 			return rd
 		}
 	}
-	// bare UUID fallback for stale entries
 	short := id
 	if idx := strings.LastIndexByte(id, '/'); idx >= 0 {
 		short = id[idx+1:]
@@ -335,9 +370,8 @@ func (c *Cache) SetReminder(id string, rd *ReminderData) error {
 	if key == "" {
 		return fmt.Errorf("cache.SetReminder: %q is not a valid reminder ID", id)
 	}
-	// clean up any old bare-UUID alias
-	short := strings.TrimPrefix(id, "Reminder/")
-	if short != key {
+	short := strings.TrimPrefix(strings.ToUpper(id), "REMINDER/")
+	if _, exists := c.Reminders[short]; exists {
 		delete(c.Reminders, short)
 	}
 	c.Reminders[key] = rd
@@ -351,21 +385,31 @@ func (c *Cache) DeleteReminder(id string) {
 	}
 }
 
-// --- helpers ----------------------------------------------------------------
+// getDB returns the cached DB connection, or opens a new one (owned=true).
+func (c *Cache) getDB() (*sql.DB, bool, error) {
+	if c.db != nil {
+		return c.db, false, nil
+	}
+	db, err := store.Open()
+	if err != nil {
+		return nil, false, fmt.Errorf("cache: open store: %w", err)
+	}
+	return db, true, nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func ckReminderToData(r *store.CKReminder) *ReminderData {
 	rd := &ReminderData{
-		Title:          r.Title,
-		Completed:      r.Completed,
-		Flagged:        r.Flagged,
-		Priority:       r.Priority,
-		Due:            r.Due,
-		Notes:          r.Notes,
-		ListRef:        r.ListRef,
-		ParentRef:      r.ParentRef,
-		ChangeTag:      r.ChangeTag,
-		ModifiedTS:     r.ModifiedTS,
-		CompletionDate: r.CompletionDate,
+		Title: r.Title, Completed: r.Completed, Flagged: r.Flagged,
+		Priority: r.Priority, Due: r.Due, Notes: r.Notes,
+		ListRef: r.ListRef, ParentRef: r.ParentRef,
+		ChangeTag: r.ChangeTag, ModifiedTS: r.ModifiedTS, CompletionDate: r.CompletionDate,
 	}
 	if r.HashtagIDs != "" && r.HashtagIDs != "[]" {
 		var ids []string
@@ -384,29 +428,18 @@ func dataToStoreCKReminder(cloudID string, rd *ReminderData) store.CKReminder {
 		}
 	}
 	return store.CKReminder{
-		CloudID:        cloudID,
-		Title:          rd.Title,
-		Completed:      rd.Completed,
-		Flagged:        rd.Flagged,
-		Priority:       rd.Priority,
-		Due:            rd.Due,
-		Notes:          rd.Notes,
-		ListRef:        rd.ListRef,
-		ParentRef:      rd.ParentRef,
-		HashtagIDs:     hashtagJSON,
-		ChangeTag:      rd.ChangeTag,
-		ModifiedTS:     rd.ModifiedTS,
-		CompletionDate: rd.CompletionDate,
+		CloudID: cloudID, Title: rd.Title, Completed: rd.Completed,
+		Flagged: rd.Flagged, Priority: rd.Priority, Due: rd.Due, Notes: rd.Notes,
+		ListRef: rd.ListRef, ParentRef: rd.ParentRef, HashtagIDs: hashtagJSON,
+		ChangeTag: rd.ChangeTag, ModifiedTS: rd.ModifiedTS, CompletionDate: rd.CompletionDate,
 	}
 }
 
-// migrateJSONCache imports data from the old ck_cache.json if it still exists,
-// then removes it. Runs in a goroutine on first Load(); harmless if already gone.
 func migrateJSONCache(db *sql.DB) {
 	jsonPath := filepath.Join(ConfigDir(), "ck_cache.json")
 	data, err := os.ReadFile(jsonPath)
 	if err != nil {
-		return // already gone or never existed
+		return
 	}
 	var old struct {
 		Reminders map[string]*ReminderData `json:"reminders"`
@@ -417,43 +450,135 @@ func migrateJSONCache(db *sql.DB) {
 		OwnerID   *string                  `json:"owner_id"`
 	}
 	if err := json.Unmarshal(data, &old); err != nil {
-		logger.Warnf("cache: failed to parse old ck_cache.json for migration: %v", err)
+		logger.Warnf("cache: failed to parse old ck_cache.json: %v", err)
 		return
 	}
-	for id, rd := range old.Reminders {
-		ckey := CanonicalReminderKey(id)
-		if ckey == "" {
-			continue
+	_ = store.ExecTx(db, func(tx *sql.Tx) error {
+		for id, rd := range old.Reminders {
+			if ckey := CanonicalReminderKey(id); ckey != "" {
+				r := dataToStoreCKReminder(ckey, rd)
+				_, _ = tx.Exec(`INSERT INTO ck_reminders
+					(cloud_id,title,completed,flagged,priority,due,notes,list_ref,parent_ref,
+					hashtag_ids,change_tag,modified_ts,completion_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+					ON CONFLICT(cloud_id) DO NOTHING`,
+					r.CloudID, r.Title, boolInt(r.Completed), boolInt(r.Flagged), r.Priority,
+					r.Due, r.Notes, r.ListRef, r.ParentRef, r.HashtagIDs,
+					r.ChangeTag, r.ModifiedTS, r.CompletionDate)
+			}
 		}
-		_ = store.UpsertCKReminder(db, dataToStoreCKReminder(ckey, rd))
-	}
-	for id, name := range old.Lists {
-		_ = store.UpsertCKList(db, id, name)
-	}
-	for id, s := range old.Sections {
-		_ = store.UpsertCKSection(db, store.CKSection{
-			SectionID:     id,
-			Name:          s.Name,
-			CanonicalName: s.CanonicalName,
-			ListRef:       s.ListRef,
-			ChangeTag:     s.ChangeTag,
-		})
-	}
-	for id, h := range old.Hashtags {
-		_ = store.UpsertCKHashtag(db, store.CKHashtag{
-			HashtagID:   id,
-			Name:        h.Name,
-			ReminderRef: h.ReminderRef,
-			ChangeTag:   h.ChangeTag,
-		})
-	}
-	if old.SyncToken != nil {
-		_ = store.SetCKSyncState(db, "sync_token", *old.SyncToken)
-	}
-	if old.OwnerID != nil {
-		_ = store.SetCKSyncState(db, "owner_id", *old.OwnerID)
-	}
-	// rename rather than delete so nothing is lost
+		for id, name := range old.Lists {
+			// Use DO UPDATE so migrated list names survive even if CloudKit didn't re-emit them.
+			_, _ = tx.Exec(`INSERT INTO ck_lists (list_id,name) VALUES(?,?)
+				ON CONFLICT(list_id) DO UPDATE SET name=excluded.name`, id, name)
+		}
+		if old.SyncToken != nil {
+			_, _ = tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('sync_token',?) ON CONFLICT DO NOTHING`, *old.SyncToken)
+		}
+		if old.OwnerID != nil {
+			_, _ = tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('owner_id',?) ON CONFLICT DO NOTHING`, *old.OwnerID)
+		}
+		return nil
+	})
 	_ = os.Rename(jsonPath, jsonPath+".migrated")
-	logger.Infof("cache: migrated ck_cache.json → SQLite, file renamed to .migrated")
+	logger.Infof("cache: migrated ck_cache.json → SQLite")
+}
+
+// NewCacheWithDB returns an empty in-memory cache backed by an existing DB.
+// Used when resetting the in-memory state for a forced full sync without
+// closing and reopening the database connection.
+func NewCacheWithDB(db *sql.DB) *Cache {
+	return &Cache{
+		Reminders: make(map[string]*ReminderData),
+		Sections:  make(map[string]*SectionData),
+		Hashtags:  make(map[string]*HashtagData),
+		Lists:     make(map[string]string),
+		db:        db,
+	}
+}
+
+// DB returns the underlying database connection, or nil if not set.
+// Used by the sync engine to pass the handle across a force-reset.
+func (c *Cache) DB() *sql.DB {
+	return c.db
+}
+
+// FlushAllFull is like FlushAll but first truncates the ck_reminders,
+// ck_lists, ck_sections, and ck_hashtags tables so that records deleted
+// from CloudKit are also removed from the local DB. Use this at the end
+// of a forced full sync, not a delta sync.
+func (c *Cache) FlushAllFull() error {
+	db, owned, err := c.getDB()
+	if err != nil {
+		return err
+	}
+	if owned {
+		defer db.Close()
+	}
+	now := time.Now().Format("2006-01-02T15:04:05")
+	c.UpdatedAt = &now
+	return store.ExecTx(db, func(tx *sql.Tx) error {
+		// No truncation: CloudKit zone-change feed may not re-emit all records on a forced
+		// sync. We upsert everything we see and rely on deleted:true records to remove stale
+		// entries. Local deletes propagate via deleted:true records in the zone feed.
+		if c.SyncToken != nil {
+			if _, err := tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('sync_token',?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, *c.SyncToken); err != nil {
+				return err
+			}
+		}
+		if c.OwnerID != nil {
+			if _, err := tx.Exec(`INSERT INTO ck_sync_state (key,value) VALUES('owner_id',?)
+				ON CONFLICT(key) DO UPDATE SET value=excluded.value`, *c.OwnerID); err != nil {
+				return err
+			}
+		}
+		for id, rd := range c.Reminders {
+			ckey := CanonicalReminderKey(id)
+			if ckey == "" {
+				continue
+			}
+			r := dataToStoreCKReminder(ckey, rd)
+			if _, err := tx.Exec(`INSERT INTO ck_reminders
+				(cloud_id,title,completed,flagged,priority,due,notes,list_ref,parent_ref,
+				 hashtag_ids,change_tag,modified_ts,completion_date)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+				ON CONFLICT(cloud_id) DO UPDATE SET
+				title=excluded.title,completed=excluded.completed,flagged=excluded.flagged,
+				priority=excluded.priority,due=excluded.due,notes=excluded.notes,
+				list_ref=excluded.list_ref,parent_ref=excluded.parent_ref,
+				hashtag_ids=excluded.hashtag_ids,change_tag=excluded.change_tag,
+				modified_ts=excluded.modified_ts,completion_date=excluded.completion_date`,
+				r.CloudID, r.Title, boolInt(r.Completed), boolInt(r.Flagged), r.Priority,
+				r.Due, r.Notes, r.ListRef, r.ParentRef, r.HashtagIDs,
+				r.ChangeTag, r.ModifiedTS, r.CompletionDate); err != nil {
+				return fmt.Errorf("flush reminder %s: %w", ckey, err)
+			}
+		}
+		for id, name := range c.Lists {
+			if _, err := tx.Exec(`INSERT INTO ck_lists (list_id,name) VALUES(?,?)
+				ON CONFLICT(list_id) DO UPDATE SET name=excluded.name`, id, name); err != nil {
+				return err
+			}
+		}
+		for id, s := range c.Sections {
+			if _, err := tx.Exec(`INSERT INTO ck_sections
+				(section_id,name,canonical_name,list_ref,change_tag) VALUES(?,?,?,?,?)
+				ON CONFLICT(section_id) DO UPDATE SET name=excluded.name,
+				canonical_name=excluded.canonical_name,list_ref=excluded.list_ref,
+				change_tag=excluded.change_tag`,
+				id, s.Name, s.CanonicalName, s.ListRef, s.ChangeTag); err != nil {
+				return err
+			}
+		}
+		for id, h := range c.Hashtags {
+			if _, err := tx.Exec(`INSERT INTO ck_hashtags
+				(hashtag_id,name,reminder_ref,change_tag) VALUES(?,?,?,?)
+				ON CONFLICT(hashtag_id) DO UPDATE SET name=excluded.name,
+				reminder_ref=excluded.reminder_ref,change_tag=excluded.change_tag`,
+				id, h.Name, h.ReminderRef, h.ChangeTag); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
