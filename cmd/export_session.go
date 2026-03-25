@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"icloud-reminders/internal/cache"
+	"icloud-reminders/internal/store"
 )
 
 var exportSessionCmd = &cobra.Command{
@@ -24,7 +25,7 @@ var exportSessionCmd = &cobra.Command{
 		}
 
 		// Export the known session files by path, not by extension scan.
-		candidates := []string{cache.SessionFile(), cache.CacheFile()}
+		candidates := []string{cache.SessionFile(), store.DBPath()}
 		var sessionFiles []string
 		for _, p := range candidates {
 			if _, err := os.Stat(p); err == nil {

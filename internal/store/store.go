@@ -321,10 +321,305 @@ func migrate(db *sql.DB) error {
 			FOREIGN KEY (queue_key) REFERENCES queue_items(queue_key) ON DELETE CASCADE
 		)`,
 	}
+	if err := migrateCKCache(db); err != nil {
+		return err
+	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// CloudKit cache tables — replaces internal/cache ck_cache.json
+// ---------------------------------------------------------------------------
+
+// CKReminder is the DB row for a cached CloudKit reminder record.
+type CKReminder struct {
+	CloudID        string  // PRIMARY KEY, always "Reminder/<UPPER-UUID>"
+	Title          string
+	Completed      bool
+	Flagged        bool
+	Priority       int
+	Due            *string
+	Notes          *string
+	ListRef        *string
+	ParentRef      *string
+	HashtagIDs     string  // JSON array
+	ChangeTag      *string
+	ModifiedTS     *int64
+	CompletionDate *string
+}
+
+func migrateCKCache(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS ck_sync_state (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ck_reminders (
+			cloud_id        TEXT PRIMARY KEY CHECK(cloud_id LIKE 'Reminder/%'),
+			title           TEXT NOT NULL DEFAULT '',
+			completed       INTEGER NOT NULL DEFAULT 0,
+			flagged         INTEGER NOT NULL DEFAULT 0,
+			priority        INTEGER NOT NULL DEFAULT 0,
+			due             TEXT,
+			notes           TEXT,
+			list_ref        TEXT,
+			parent_ref      TEXT,
+			hashtag_ids     TEXT NOT NULL DEFAULT '[]',
+			change_tag      TEXT,
+			modified_ts     INTEGER,
+			completion_date TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS ck_lists (
+			list_id TEXT PRIMARY KEY,
+			name    TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS ck_sections (
+			section_id     TEXT PRIMARY KEY,
+			name           TEXT NOT NULL DEFAULT '',
+			canonical_name TEXT,
+			list_ref       TEXT,
+			change_tag     TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS ck_hashtags (
+			hashtag_id   TEXT PRIMARY KEY,
+			name         TEXT NOT NULL DEFAULT '',
+			reminder_ref TEXT,
+			change_tag   TEXT
+		)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrateCKCache: %w", err)
+		}
+	}
+	return nil
+}
+
+// UpsertCKReminder inserts or replaces a reminder row.
+// cloud_id must be in canonical "Reminder/<UPPER-UUID>" form — the DB CHECK
+// constraint enforces this.
+func UpsertCKReminder(db *sql.DB, r CKReminder) error {
+	_, err := db.Exec(`
+		INSERT INTO ck_reminders
+			(cloud_id, title, completed, flagged, priority, due, notes,
+			 list_ref, parent_ref, hashtag_ids, change_tag, modified_ts, completion_date)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(cloud_id) DO UPDATE SET
+			title=excluded.title, completed=excluded.completed,
+			flagged=excluded.flagged, priority=excluded.priority,
+			due=excluded.due, notes=excluded.notes,
+			list_ref=excluded.list_ref, parent_ref=excluded.parent_ref,
+			hashtag_ids=excluded.hashtag_ids, change_tag=excluded.change_tag,
+			modified_ts=excluded.modified_ts, completion_date=excluded.completion_date`,
+		r.CloudID, r.Title, boolInt(r.Completed), boolInt(r.Flagged),
+		r.Priority, r.Due, r.Notes, r.ListRef, r.ParentRef,
+		r.HashtagIDs, r.ChangeTag, r.ModifiedTS, r.CompletionDate,
+	)
+	return err
+}
+
+// DeleteCKReminder removes a reminder and all its aliases.
+func DeleteCKReminder(db *sql.DB, cloudID string) error {
+	_, err := db.Exec(`DELETE FROM ck_reminders WHERE cloud_id = ?`, cloudID)
+	return err
+}
+
+// GetCKReminder fetches one reminder by canonical cloud_id.
+func GetCKReminder(db *sql.DB, cloudID string) (*CKReminder, error) {
+	row := db.QueryRow(`SELECT cloud_id,title,completed,flagged,priority,due,notes,
+		list_ref,parent_ref,hashtag_ids,change_tag,modified_ts,completion_date
+		FROM ck_reminders WHERE cloud_id=?`, cloudID)
+	return scanCKReminder(row)
+}
+
+// ListCKReminders returns all non-completed or all reminders.
+func ListCKReminders(db *sql.DB, includeCompleted bool) ([]*CKReminder, error) {
+	q := `SELECT cloud_id,title,completed,flagged,priority,due,notes,
+		list_ref,parent_ref,hashtag_ids,change_tag,modified_ts,completion_date
+		FROM ck_reminders`
+	if !includeCompleted {
+		q += ` WHERE completed=0`
+	}
+	rows, err := db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*CKReminder
+	for rows.Next() {
+		r, err := scanCKReminder(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCKReminder(row rowScanner) (*CKReminder, error) {
+	var r CKReminder
+	var completed, flagged int
+	err := row.Scan(&r.CloudID, &r.Title, &completed, &flagged, &r.Priority,
+		&r.Due, &r.Notes, &r.ListRef, &r.ParentRef, &r.HashtagIDs,
+		&r.ChangeTag, &r.ModifiedTS, &r.CompletionDate)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.Completed = completed != 0
+	r.Flagged = flagged != 0
+	return &r, nil
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// UpsertCKList inserts or replaces a list name.
+func UpsertCKList(db *sql.DB, listID, name string) error {
+	_, err := db.Exec(`INSERT INTO ck_lists (list_id,name) VALUES(?,?)
+		ON CONFLICT(list_id) DO UPDATE SET name=excluded.name`, listID, name)
+	return err
+}
+
+// DeleteCKList removes a list.
+func DeleteCKList(db *sql.DB, listID string) error {
+	_, err := db.Exec(`DELETE FROM ck_lists WHERE list_id=?`, listID)
+	return err
+}
+
+// ListCKLists returns all lists as id→name map.
+func ListCKLists(db *sql.DB) (map[string]string, error) {
+	rows, err := db.Query(`SELECT list_id, name FROM ck_lists`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// CKSection mirrors SectionData.
+type CKSection struct {
+	SectionID     string
+	Name          string
+	CanonicalName *string
+	ListRef       *string
+	ChangeTag     *string
+}
+
+// UpsertCKSection inserts or replaces a section.
+func UpsertCKSection(db *sql.DB, s CKSection) error {
+	_, err := db.Exec(`INSERT INTO ck_sections (section_id,name,canonical_name,list_ref,change_tag)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(section_id) DO UPDATE SET
+			name=excluded.name, canonical_name=excluded.canonical_name,
+			list_ref=excluded.list_ref, change_tag=excluded.change_tag`,
+		s.SectionID, s.Name, s.CanonicalName, s.ListRef, s.ChangeTag)
+	return err
+}
+
+// DeleteCKSection removes a section.
+func DeleteCKSection(db *sql.DB, sectionID string) error {
+	_, err := db.Exec(`DELETE FROM ck_sections WHERE section_id=?`, sectionID)
+	return err
+}
+
+// ListCKSections returns all sections as id→CKSection map.
+func ListCKSections(db *sql.DB) (map[string]*CKSection, error) {
+	rows, err := db.Query(`SELECT section_id,name,canonical_name,list_ref,change_tag FROM ck_sections`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*CKSection{}
+	for rows.Next() {
+		var s CKSection
+		if err := rows.Scan(&s.SectionID, &s.Name, &s.CanonicalName, &s.ListRef, &s.ChangeTag); err != nil {
+			return nil, err
+		}
+		out[s.SectionID] = &s
+	}
+	return out, rows.Err()
+}
+
+// CKHashtag mirrors HashtagData.
+type CKHashtag struct {
+	HashtagID   string
+	Name        string
+	ReminderRef *string
+	ChangeTag   *string
+}
+
+// UpsertCKHashtag inserts or replaces a hashtag.
+func UpsertCKHashtag(db *sql.DB, h CKHashtag) error {
+	_, err := db.Exec(`INSERT INTO ck_hashtags (hashtag_id,name,reminder_ref,change_tag)
+		VALUES(?,?,?,?)
+		ON CONFLICT(hashtag_id) DO UPDATE SET
+			name=excluded.name, reminder_ref=excluded.reminder_ref,
+			change_tag=excluded.change_tag`,
+		h.HashtagID, h.Name, h.ReminderRef, h.ChangeTag)
+	return err
+}
+
+// DeleteCKHashtag removes a hashtag.
+func DeleteCKHashtag(db *sql.DB, hashtagID string) error {
+	_, err := db.Exec(`DELETE FROM ck_hashtags WHERE hashtag_id=?`, hashtagID)
+	return err
+}
+
+// ListCKHashtags returns all hashtags as id→CKHashtag map.
+func ListCKHashtags(db *sql.DB) (map[string]*CKHashtag, error) {
+	rows, err := db.Query(`SELECT hashtag_id,name,reminder_ref,change_tag FROM ck_hashtags`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*CKHashtag{}
+	for rows.Next() {
+		var h CKHashtag
+		if err := rows.Scan(&h.HashtagID, &h.Name, &h.ReminderRef, &h.ChangeTag); err != nil {
+			return nil, err
+		}
+		out[h.HashtagID] = &h
+	}
+	return out, rows.Err()
+}
+
+// GetCKSyncState fetches a sync state value by key ("sync_token", "owner_id").
+func GetCKSyncState(db *sql.DB, key string) (string, error) {
+	var val string
+	err := db.QueryRow(`SELECT value FROM ck_sync_state WHERE key=?`, key).Scan(&val)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return val, err
+}
+
+// SetCKSyncState upserts a sync state value.
+func SetCKSyncState(db *sql.DB, key, value string) error {
+	_, err := db.Exec(`INSERT INTO ck_sync_state (key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
 }
