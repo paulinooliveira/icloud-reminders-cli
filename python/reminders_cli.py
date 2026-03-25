@@ -1104,7 +1104,7 @@ def cmd_queue_sync(args, api):
             if not item.cloud_id:
                 result = rem_api.create_reminder(title, priority=item.priority,
                     notes=notes, flagged=item.flagged, due=item.due)
-                cloud_id = result.get("cloud_id") or result.get("guid")
+                cloud_id = result.get("id") or result.get("cloud_id") or result.get("guid")
                 if cloud_id:
                     db._db.upsert_queue_item(item.key, item.title, cloud_id=cloud_id)
                 created += 1
