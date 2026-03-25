@@ -602,15 +602,17 @@ def cmd_edit(args, api):
     owner  = get_owner(api)
     rec    = find_reminder_by_id(api, owner, args.guid)
     tag    = rec.get("recordChangeTag")
-    fields = dict(rec.get("fields", {}))
+    existing = rec.get("fields", {})
 
+    # Only send fields that are actually changing
+    fields = {}
     touched = []
     if args.title    is not None:
-        existing_td = fields.get("TitleDocument", {}).get("value", "")
+        existing_td = existing.get("TitleDocument", {}).get("value", "")
         fields["TitleDocument"] = {"value": replace_crdt_text(existing_td, args.title)}
         touched.append("titleDocument")
     if args.notes    is not None:
-        existing_nd = fields.get("NotesDocument", {}).get("value", "")
+        existing_nd = existing.get("NotesDocument", {}).get("value", "")
         fields["NotesDocument"] = {"value": replace_crdt_text(existing_nd, args.notes)}
         touched.append("notesDocument")
     if args.priority is not None:
@@ -625,7 +627,7 @@ def cmd_edit(args, api):
     if touched:
         import time as _time
         fields["LastModifiedDate"] = {"value": int(_time.time() * 1000), "type": "TIMESTAMP"}
-        fields["ResolutionTokenMap"] = {"value": _bump_resolution_map(fields, touched), "type": "STRING"}
+        fields["ResolutionTokenMap"] = {"value": _bump_resolution_map(existing, touched), "type": "STRING"}
     if args.due is not None:
         try:
             fmt = "%Y-%m-%dT%H:%M" if "T" in args.due else "%Y-%m-%d"
