@@ -186,26 +186,21 @@ func reconcileQueueReminder(spec queue.Spec, stateItem queue.StateItem, priority
 	}
 
 	if cloudID != "" {
-		textNeedsRewrite := !createdNew && (spec.Notes != nil || stateItem.Title != spec.Title)
+		textNeedsEdit := !createdNew && (spec.Title != stateItem.Title || spec.Notes != nil)
 		rewritten := false
 		children := stateItem.Children
-		if textNeedsRewrite {
-			// Never mutate title/notes in place: Apple’s CRDT merge can duplicate/corrupt.
-			// Instead: recreate (create-new + delete-old) and hard-dedupe residuals.
-			if err := syncEngine.Sync(false); err != nil && !shouldProceedWithoutSync(cloudID) {
+		if textNeedsEdit {
+			textChanges := writer.ReminderChanges{}
+			if spec.Title != stateItem.Title {
+				textChanges.Title = &spec.Title
+			}
+			if spec.Notes != nil {
+				textChanges.Notes = spec.Notes
+			}
+			if _, err := w.EditReminderNoVisibleRepair(cloudID, textChanges); err != nil {
 				return queueReconcileResult{}, err
 			}
-			oldCloudID := cloudID
-			newAppleID, newCloudID, newChildren, err := recreateQueueReminderTree(oldCloudID, listID, spec, priorityLabel, children)
-			if err != nil {
-				return queueReconcileResult{}, err
-			}
-			appleID = newAppleID
-			cloudID = newCloudID
-			children = newChildren
-			createdNew = true
 			rewritten = true
-
 		}
 
 		changes := writer.ReminderChanges{}
@@ -379,104 +374,6 @@ func repairUniqueTitleInList(listID, expectedTitle, keepCloudID string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("failed to converge single reminder for %q in %s", expectedTitle, listID)
-}
-
-func recreateQueueReminderTree(oldCloudID, listID string, spec queue.Spec, priorityLabel string, children map[string]queue.ChildStateItem) (string, string, map[string]queue.ChildStateItem, error) {
-	res, err := w.AddReminder(spec.Title, listID, deref(spec.Due), priorityLabel, deref(spec.Notes), "")
-	if err != nil {
-		return "", "", nil, err
-	}
-	if errMsg, ok := res["error"].(string); ok && errMsg != "" {
-		return "", "", nil, fmt.Errorf("%s", errMsg)
-	}
-	newCloudID, _ := res["id"].(string)
-	if strings.TrimSpace(newCloudID) == "" {
-		return "", "", nil, fmt.Errorf("queue reminder recreate did not return a new reminder id")
-	}
-	newAppleID := "x-apple-reminder://" + shortReminderID(newCloudID)
-
-	if spec.Flagged != nil && *spec.Flagged {
-		if _, err := w.EditReminderNoVisibleRepair(newCloudID, writer.ReminderChanges{Flagged: spec.Flagged}); err != nil {
-			return "", "", nil, err
-		}
-	}
-
-	newChildren := map[string]queue.ChildStateItem{}
-	if len(children) > 0 {
-		for childKey, child := range children {
-			title := strings.TrimSpace(child.Title)
-			if title == "" {
-				continue
-			}
-			childRes, err := w.AddReminder(title, listID, deref(child.Due), priorityLabelFromValue(child.Priority), "", newCloudID)
-			if err != nil {
-				return "", "", nil, err
-			}
-			if errMsg, ok := childRes["error"].(string); ok && errMsg != "" {
-				return "", "", nil, fmt.Errorf("%s", errMsg)
-			}
-			childCloudID, _ := childRes["id"].(string)
-			if strings.TrimSpace(childCloudID) == "" {
-				return "", "", nil, fmt.Errorf("queue reminder recreate child did not return a new reminder id")
-			}
-			if child.Flagged {
-				flagged := true
-				if _, err := w.EditReminderNoVisibleRepair(childCloudID, writer.ReminderChanges{Flagged: &flagged}); err != nil {
-					return "", "", nil, err
-				}
-			}
-			child.AppleID = "x-apple-reminder://" + shortReminderID(childCloudID)
-			child.CloudID = childCloudID
-			newChildren[childKey] = child
-		}
-	}
-
-	// Resolve and delete the old parent reminder last, after the new subtree exists.
-	if strings.TrimSpace(oldCloudID) != "" {
-		if err := deleteCloudChildrenForParent(oldCloudID); err != nil {
-			return "", "", nil, err
-		}
-		if err := deleteCloudIDIfPresent(oldCloudID); err != nil {
-			return "", "", nil, err
-		}
-	}
-	return newAppleID, newCloudID, newChildren, nil
-}
-
-func deleteCloudChildrenForParent(parentIDHint string) error {
-	if strings.TrimSpace(parentIDHint) == "" {
-		return nil
-	}
-	if err := syncEngine.Sync(false); err != nil {
-		return err
-	}
-	parentID := syncEngine.FindReminderByID(shortReminderID(parentIDHint))
-	if parentID == "" {
-		parentID = parentIDHint
-	}
-	for _, r := range syncEngine.GetReminders(true) {
-		if r == nil || r.ParentRef == nil || strings.TrimSpace(*r.ParentRef) == "" {
-			continue
-		}
-		if !sameReminderID(*r.ParentRef, parentID) {
-			continue
-		}
-		if err := deleteCloudRecordStrict(r.ID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func deleteCloudIDIfPresent(id string) error {
-	if strings.TrimSpace(id) == "" {
-		return nil
-	}
-	candidate := syncEngine.FindReminderByID(shortReminderID(id))
-	if candidate == "" {
-		candidate = id
-	}
-	return deleteCloudRecordStrict(candidate)
 }
 
 func deleteCloudRecordStrict(id string) error {

@@ -216,13 +216,11 @@ func upsertQueueChild(state *queue.State, parentKey, childKey, title string, due
 			return fmt.Errorf("queue child creation did not return a reminder id")
 		}
 	} else if priorTitle != title && childState.CloudID != "" {
-		result, err := recreateQueueChildReminderID(parentCloudID, parentListID, childID, title, childState, due, priority, flagged)
-		if err != nil {
+		// Title changed: edit in place, preserving the cloud ID.
+		newTitle := title
+		if _, err := queueChildEditReminder(childID, writer.ReminderChanges{Title: &newTitle}); err != nil {
 			return err
 		}
-		childID, _ = result["id"].(string)
-		childState.CloudID = childID
-		childState.AppleID = "x-apple-reminder://" + shortReminderID(childID)
 	}
 
 	changes := writer.ReminderChanges{}
@@ -252,52 +250,6 @@ func upsertQueueChild(state *queue.State, parentKey, childKey, title string, due
 	fmt.Printf("✅ Queue child upserted: %s [%s/%s]\n", title, parentKey, childKey)
 	return nil
 }
-
-func recreateQueueChildReminderID(parentCloudID, parentListID, oldCloudID, newTitle string, childState queue.ChildStateItem, due *string, priority *int, flagged *bool) (map[string]interface{}, error) {
-	dueValue := deref(due)
-	if due == nil {
-		dueValue = deref(childState.Due)
-	}
-	priorityValue := derefPriority(priority, childState.Priority)
-
-	result, err := queueChildAddReminder(newTitle, parentListID, dueValue, priorityLabelFromValue(priorityValue), "", parentCloudID)
-	if err != nil {
-		return nil, err
-	}
-	newID, _ := result["id"].(string)
-	if strings.TrimSpace(newID) == "" {
-		return nil, fmt.Errorf("queue child recreate did not return a new reminder id")
-	}
-
-	targetFlagged := childState.Flagged
-	if flagged != nil {
-		targetFlagged = *flagged
-	}
-	if targetFlagged {
-		if _, err := queueChildEditReminder(newID, writer.ReminderChanges{Flagged: &targetFlagged}); err != nil {
-			return nil, err
-		}
-	}
-	if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-		return nil, fmt.Errorf("%s", errMsg)
-	}
-
-	if oldCloudID != "" {
-		deleteOldResult, deleteErr := queueChildDeleteReminder(oldCloudID)
-		if deleteErr != nil {
-			if errMsg, ok := deleteOldResult["error"].(string); ok && errMsg != "" {
-				deleteErr = fmt.Errorf("%s", errMsg)
-			}
-			if _, cleanupErr := queueChildDeleteReminder(newID); cleanupErr != nil {
-				return nil, fmt.Errorf("recreate child failed and could not delete new id %s after old delete failed: %w", newID, deleteErr)
-			}
-			return nil, deleteErr
-		}
-	}
-	result["id"] = newID
-	return result, nil
-}
-
 func completeQueueChild(state *queue.State, parentKey, childKey string, loud bool) error {
 	parentItem, ok := state.Items[parentKey]
 	if !ok || strings.TrimSpace(parentItem.Title) == "" {

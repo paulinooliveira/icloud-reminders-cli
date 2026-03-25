@@ -39,32 +39,21 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 
 	addCalls := 0
 	deleteCalls := 0
-	editCalls := 0
+	var editedID string
+	var editedTitle string
 
-	queueChildAddReminder = func(title, listName, dueDate, priority, notes, parentID string) (map[string]interface{}, error) {
+	queueChildAddReminder = func(_, _, _, _, _, _ string) (map[string]interface{}, error) {
 		addCalls++
-		if title != "New title" {
-			t.Fatalf("expected new child title, got %q", title)
-		}
-		if parentID != "11111111-1111-1111-1111-111111111111" {
-			t.Fatalf("expected parent cloud id parent, got %q", parentID)
-		}
-		if listName != "List/SEB" {
-			t.Fatalf("expected parent list id, got %q", listName)
-		}
-		return map[string]interface{}{"id": "33333333-3333-3333-3333-333333333333"}, nil
-	}
-	queueChildDeleteReminder = func(reminderID string) (map[string]interface{}, error) {
-		deleteCalls++
-		if reminderID != "22222222-2222-2222-2222-222222222222" && reminderID != "33333333-3333-3333-3333-333333333333" {
-			t.Fatalf("unexpected delete id %q", reminderID)
-		}
 		return map[string]interface{}{}, nil
 	}
-	queueChildEditReminder = func(reminderID string, _ writer.ReminderChanges) (map[string]interface{}, error) {
-		editCalls++
-		if reminderID != "33333333-3333-3333-3333-333333333333" {
-			t.Fatalf("unexpected edited reminder %q", reminderID)
+	queueChildDeleteReminder = func(string) (map[string]interface{}, error) {
+		deleteCalls++
+		return map[string]interface{}{}, nil
+	}
+	queueChildEditReminder = func(reminderID string, changes writer.ReminderChanges) (map[string]interface{}, error) {
+		if changes.Title != nil {
+			editedID = reminderID
+			editedTitle = *changes.Title
 		}
 		return map[string]interface{}{}, nil
 	}
@@ -79,19 +68,28 @@ func TestUpsertQueueChildRecreatesOnTitleChange(t *testing.T) {
 		t.Fatalf("upsertQueueChild: %v", err)
 	}
 
+	// In-place edit: no add or delete calls, only an edit preserving the original cloud ID.
+	if addCalls != 0 {
+		t.Fatalf("expected no add calls on title change, got %d", addCalls)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("expected no delete calls on title change, got %d", deleteCalls)
+	}
+	if editedID != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("expected in-place edit on original cloud id, got %q", editedID)
+	}
+	if editedTitle != "New title" {
+		t.Fatalf("expected edited title %q, got %q", "New title", editedTitle)
+	}
+
 	parent := state.Items["parent"]
 	child := parent.Children["child"]
-	if child.CloudID != "33333333-3333-3333-3333-333333333333" {
-		t.Fatalf("expected recreated child cloud id, got %q", child.CloudID)
+	// Cloud ID must be preserved — no new record was created.
+	if child.CloudID != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("expected original cloud id preserved, got %q", child.CloudID)
 	}
 	if child.Title != "New title" {
 		t.Fatalf("expected updated child title, got %q", child.Title)
-	}
-	if child.AppleID != "x-apple-reminder://33333333-3333-3333-3333-333333333333" {
-		t.Fatalf("expected updated apple id, got %q", child.AppleID)
-	}
-	if addCalls != 1 || deleteCalls != 1 || editCalls == 0 {
-		t.Fatalf("expected add=1, delete=1, edit>=1 got add=%d delete=%d edit=%d", addCalls, deleteCalls, editCalls)
 	}
 }
 
