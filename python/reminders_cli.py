@@ -700,6 +700,367 @@ def cmd_delete(args, api):
 
 
 
+# ---------------------------------------------------------------------------
+# Queue adapters
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+_sys.path.insert(0, _sys.path[0])  # ensure local imports work
+
+from state import StateDB as _StateDB
+from sebastian_queue import (
+    QueueItem, QueueManager, ChecklistItem,
+    PRIORITY_MAP as _PMAP, _parse_checklist_line, render_notes,
+    _deserialize_item, _serialize_item,
+)
+
+_DB_PATH = Path.home() / ".config" / "icloud-reminders" / "state.db"
+
+
+class _StateDBAdapter:
+    """Bridge QueueManager's set_queue_item/get_queue_item to StateDB's upsert API."""
+    def __init__(self, db: _StateDB):
+        self._db = db
+
+    def get_queue_item(self, key: str):
+        row = self._db.get_queue_item(key)
+        if not row:
+            return None
+        children = {}
+        for c in self._db.list_queue_children(key):
+            ck = c["child_key"]
+            children[ck] = {"key": ck, "title": c["title"], "cloud_id": c.get("cloud_id",""),
+                "due": c.get("due_at"), "priority": c.get("priority_value",0),
+                "flagged": bool(c.get("flagged",0)), "updated_at": c.get("updated_at","")}
+        import json as _json
+        row["checklist"] = _json.loads(row.get("checklist_json") or "[]")
+        row["tags"] = _json.loads(row.get("tags_json") or "[]")
+        row["blocked"] = bool(row.get("blocked", 0))
+        row["flagged"] = bool(row.get("flagged", 0) if "flagged" in row else False)
+        row["priority"] = row.get("priority_value", 0)
+        row["status_line"] = row.get("status_line") or ""
+        row["executor"] = row.get("executor") or ""
+        row["due"] = row.get("due_at")
+        row["section"] = row.get("section_name") or ""
+        row["notes"] = row.get("legacy_notes") or ""
+        row["hours_budget"] = row.get("hours_budget", 0.0)
+        row["tokens_budget"] = row.get("tokens_budget", 0)
+        row["cloud_id"] = row.get("cloud_id") or ""
+        row["updated_at"] = row.get("updated_at") or ""
+        row["children"] = children
+        row["key"] = key
+        row["title"] = row.get("title", "")
+        return row
+
+    def set_queue_item(self, key: str, data: dict):
+        import json as _json
+        checklist = data.get("checklist", [])
+        tags = data.get("tags", [])
+        children = data.pop("children", {})
+        self._db.upsert_queue_item(
+            key, data["title"],
+            cloud_id=data.get("cloud_id") or None,
+            section_name=data.get("section") or None,
+            tags_json=_json.dumps(tags),
+            priority_value=data.get("priority", 0),
+            due_at=data.get("due"),
+            status_line=data.get("status_line") or None,
+            checklist_json=_json.dumps(checklist),
+            hours_budget=data.get("hours_budget", 0.0),
+            tokens_budget=data.get("tokens_budget", 0),
+            executor=data.get("executor") or None,
+            blocked=int(bool(data.get("blocked", False))),
+            legacy_notes=data.get("notes") or None,
+            updated_at=data.get("updated_at"),
+        )
+        for ck, cv in children.items():
+            self._db.upsert_queue_child(
+                key, ck, cv["title"],
+                cloud_id=cv.get("cloud_id") or None,
+                due_at=cv.get("due"),
+                priority_value=cv.get("priority", 0),
+                flagged=int(bool(cv.get("flagged", False))),
+                updated_at=cv.get("updated_at") or None,
+            )
+
+    def delete_queue_item(self, key: str):
+        self._db.delete_queue_item(key)
+
+    def list_queue_items(self) -> list:
+        items = []
+        for row in self._db.list_queue_items():
+            enriched = self.get_queue_item(row["queue_key"])
+            if enriched:
+                items.append(enriched)
+        return items
+
+
+class _RemindersAPI:
+    """Duck-typed adapter wiring QueueManager to the CloudKit helpers."""
+    def __init__(self, api, owner, list_name="Sebastian"):
+        self._api = api
+        self._owner = owner
+        self._list_name = list_name
+
+    def _list_uuid(self):
+        return find_list(self._api, self._owner, self._list_name)["uuid"]
+
+    def create_reminder(self, title, list_name=None, **kwargs):
+        lname = list_name or self._list_name
+        lst = find_list(self._api, self._owner, lname)
+        list_uuid = lst["uuid"]
+        now_ms = int(time.time() * 1000)
+        now_apple = time.time() - 978307200
+        replica = str(uuid.uuid4()).upper()
+        touched = ["titleDocument", "completed", "list", "allDay", "flagged", "priority", "lastModifiedDate"]
+        rtm = {"map": {k: {"counter": 0, "modificationTime": now_apple, "replicaID": replica} for k in touched}}
+        prio = kwargs.get("priority", 0)
+        if isinstance(prio, str):
+            prio = PRIORITY_MAP.get(prio, 0)
+        fields = {
+            "TitleDocument":    {"value": encode_title(title)},
+            "Completed":        {"value": 0},
+            "Deleted":          {"value": 0},
+            "Flagged":          {"value": int(bool(kwargs.get("flagged", False)))},
+            "AllDay":           {"value": 0},
+            "Imported":         {"value": 0},
+            "Priority":         {"value": prio},
+            "List":             {"value": {"recordName": f"List/{list_uuid}", "action": "VALIDATE"}, "type": "REFERENCE"},
+            "LastModifiedDate": {"value": now_ms, "type": "TIMESTAMP"},
+            "ResolutionTokenMap": {"value": json.dumps(rtm), "type": "STRING"},
+        }
+        notes = kwargs.get("notes")
+        if notes:
+            rtm["map"]["notesDocument"] = {"counter": 0, "modificationTime": now_apple, "replicaID": replica}
+            fields["NotesDocument"] = {"value": encode_title(notes)}
+            fields["ResolutionTokenMap"] = {"value": json.dumps(rtm), "type": "STRING"}
+        due = kwargs.get("due")
+        if due:
+            try:
+                fmt = "%Y-%m-%dT%H:%M" if "T" in due else "%Y-%m-%d"
+                fields["DueDate"] = {"value": int(datetime.strptime(due, fmt).timestamp() * 1000)}
+            except ValueError:
+                pass
+        rec_name = str(uuid.uuid4()).upper()
+        resp = ck_post(self._api, "records/modify", {
+            "zoneID": zone_id(self._owner),
+            "atomic": True,
+            "operations": [{"operationType": "create", "record": {
+                "recordType": "Reminder", "recordName": rec_name,
+                "fields": fields, "parent": {"recordName": f"List/{list_uuid}"},
+            }}],
+        })
+        saved = bare_id(resp.get("records", [{}])[0].get("recordName", rec_name))
+        return {"id": saved}
+
+    def edit_reminder(self, guid, **kwargs):
+        rec = find_reminder_by_id(self._api, self._owner, guid)
+        tag = rec.get("recordChangeTag")
+        existing = rec.get("fields", {})
+        fields = {}
+        touched = []
+        title = kwargs.get("title")
+        if title is not None:
+            fields["TitleDocument"] = {"value": replace_crdt_text(existing.get("TitleDocument",{}).get("value",""), title)}
+            touched.append("titleDocument")
+        notes = kwargs.get("notes")
+        if notes is not None:
+            fields["NotesDocument"] = {"value": replace_crdt_text(existing.get("NotesDocument",{}).get("value",""), notes)}
+            touched.append("notesDocument")
+        prio = kwargs.get("priority")
+        if prio is not None:
+            if isinstance(prio, str): prio = PRIORITY_MAP.get(prio, 0)
+            fields["Priority"] = {"value": prio}
+            touched.append("priority")
+        flagged = kwargs.get("flagged")
+        if flagged is not None:
+            fields["Flagged"] = {"value": int(bool(flagged))}
+            touched.append("flagged")
+        if touched:
+            fields["LastModifiedDate"] = {"value": int(time.time() * 1000), "type": "TIMESTAMP"}
+            fields["ResolutionTokenMap"] = {"value": _bump_resolution_map(existing, touched), "type": "STRING"}
+        due = kwargs.get("due")
+        if due is not None:
+            try:
+                fmt = "%Y-%m-%dT%H:%M" if "T" in due else "%Y-%m-%d"
+                fields["DueDate"] = {"value": int(datetime.strptime(due, fmt).timestamp() * 1000)}
+            except ValueError:
+                pass
+        if not fields:
+            return {}
+        ck_post(self._api, "records/modify", {
+            "zoneID": zone_id(self._owner),
+            "atomic": True,
+            "operations": [{"operationType": "update", "record": {
+                "recordType": rec.get("recordType", "Reminder"),
+                "recordName": rec.get("recordName"), "recordChangeTag": tag,
+                "fields": fields, "parent": rec.get("parent"),
+            }}],
+        })
+        return {}
+
+    def _soft_delete(self, guid):
+        rec = find_reminder_by_id(self._api, self._owner, guid)
+        tag = rec.get("recordChangeTag")
+        rn = rec.get("recordName")
+        existing = rec.get("fields", {})
+        rtm = _bump_resolution_map(existing, ["titleDocument", "deleted", "completed", "lastModifiedDate"])
+        ck_post(self._api, "records/modify", {
+            "zoneID": zone_id(self._owner),
+            "operations": [{"operationType": "update", "record": {
+                "recordType": rec.get("recordType", "Reminder"),
+                "recordName": rn, "recordChangeTag": tag,
+                "fields": {
+                    "Deleted": {"value": 1}, "Completed": {"value": 1},
+                    "TitleDocument": {"value": encode_title("")},
+                    "LastModifiedDate": {"value": int(time.time() * 1000), "type": "TIMESTAMP"},
+                    "ResolutionTokenMap": {"value": rtm, "type": "STRING"},
+                },
+                "parent": rec.get("parent"),
+            }}],
+        })
+
+    def complete_reminder(self, guid):
+        self._soft_delete(guid)
+        return {}
+
+    def delete_reminder(self, guid):
+        self._soft_delete(guid)
+        return {}
+
+
+def _make_mgr(api, args):
+    owner = get_owner(api)
+    list_name = getattr(args, "list", None) or "Sebastian"
+    db = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    rem_api = _RemindersAPI(api, owner, list_name)
+    return QueueManager(db, rem_api, list_name), db
+
+
+# ---------------------------------------------------------------------------
+# Queue command handlers
+# ---------------------------------------------------------------------------
+
+def cmd_queue_upsert(args, api):
+    mgr, _ = _make_mgr(api, args)
+    items_raw = getattr(args, "item", []) or []
+    checklist = [_parse_checklist_line(r) for r in items_raw]
+    prio = _PMAP.get(getattr(args, "priority", "") or "", 0)
+    flagged = True if getattr(args, "flagged", False) else (False if getattr(args, "unflagged", False) else None)
+    blocked = True if getattr(args, "blocked", False) else (False if getattr(args, "unblocked", False) else None)
+    kw = dict(
+        section=getattr(args, "section", None),
+        tags=getattr(args, "tag", None) or None,
+        priority=prio if getattr(args, "priority", None) else None,
+        due=getattr(args, "due", None),
+        flagged=flagged,
+        status_line=getattr(args, "status", None),
+        checklist=checklist if checklist else None,
+        hours_budget=getattr(args, "hours_budget", None),
+        tokens_budget=getattr(args, "tokens_budget", None),
+        executor=getattr(args, "executor", None),
+        blocked=blocked,
+    )
+    kw = {k: v for k, v in kw.items() if v is not None}
+    title = getattr(args, "title", None)
+    if not title:
+        # load existing for update-only
+        existing = mgr._db.get_queue_item(args.key)
+        if not existing:
+            die("--title required when creating a new queue item")
+        title = existing["title"]
+    item = mgr.upsert(args.key, title, **kw)
+    print(f"upserted: {item.key}  cloud_id={item.cloud_id}  title={item.title!r}")
+
+
+def cmd_queue_state_json(args, api):
+    db = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    items = db.list_queue_items()
+    out = []
+    for raw in items:
+        item = _deserialize_item(raw)
+        d = _serialize_item(item)
+        out.append(d)
+    print(json.dumps(out, indent=2, default=str))
+
+
+def cmd_queue_complete(args, api):
+    mgr, _ = _make_mgr(api, args)
+    mgr.close(args.key, complete=True)
+    print(f"completed: {args.key}")
+
+
+def cmd_queue_delete(args, api):
+    mgr, _ = _make_mgr(api, args)
+    mgr.close(args.key, complete=False)
+    print(f"deleted: {args.key}")
+
+
+def cmd_queue_child_upsert(args, api):
+    mgr, _ = _make_mgr(api, args)
+    prio = _PMAP.get(getattr(args, "priority", "") or "", 0)
+    flagged = True if getattr(args, "flagged", False) else (False if getattr(args, "unflagged", False) else None)
+    kw = dict(
+        due=getattr(args, "due", None),
+        priority=prio if getattr(args, "priority", None) else None,
+        flagged=flagged,
+    )
+    kw = {k: v for k, v in kw.items() if v is not None}
+    child = mgr.upsert_child(args.parent_key, args.child_key, args.title, **kw)
+    print(f"child upserted: {args.parent_key}/{child.key}  cloud_id={child.cloud_id}")
+
+
+def cmd_queue_child_complete(args, api):
+    mgr, _ = _make_mgr(api, args)
+    mgr.close_child(args.parent_key, args.child_key)
+    print(f"child completed: {args.parent_key}/{args.child_key}")
+
+
+def cmd_queue_refresh(args, api):
+    owner = get_owner(api)
+    db_adapter = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    raw = db_adapter.get_queue_item(args.key)
+    if not raw:
+        die(f"Queue key {args.key!r} not found")
+    item = _deserialize_item(raw)
+    notes = render_notes(item)
+    rem_api = _RemindersAPI(api, owner, "Sebastian")
+    if not item.cloud_id:
+        die(f"No cloud_id for {args.key!r}; run queue-upsert first")
+    rem_api.edit_reminder(item.cloud_id, notes=notes)
+    print(f"refreshed: {args.key}  cloud_id={item.cloud_id}")
+
+
+def cmd_queue_audit(args, api):
+    owner = get_owner(api)
+    db_adapter = _StateDBAdapter(_StateDB(str(_DB_PATH)))
+    db_items = {row["key"]: _deserialize_item(row) for row in db_adapter.list_queue_items()}
+
+    lst = find_list(api, owner, "Sebastian")
+    cloud_rems = get_reminders(api, owner, lst["uuid"])
+    cloud_by_id = {}
+    for r in cloud_rems:
+        cid = bare_id(r.get("recordName",""))
+        title = extract_title(r.get("fields",{}).get("TitleDocument",{}).get("value",""))
+        cloud_by_id[cid] = title
+
+    db_cloud_ids = {item.cloud_id: key for key, item in db_items.items() if item.cloud_id}
+    mismatches = []
+    for key, item in db_items.items():
+        if item.cloud_id and item.cloud_id not in cloud_by_id:
+            mismatches.append(f"MISSING_IN_CLOUD  key={key}  cloud_id={item.cloud_id}")
+        elif not item.cloud_id:
+            mismatches.append(f"NO_CLOUD_ID       key={key}  title={item.title!r}")
+    for cid, ctitle in cloud_by_id.items():
+        if cid not in db_cloud_ids:
+            mismatches.append(f"UNTRACKED_IN_DB   cloud_id={cid}  title={ctitle!r}")
+    if not mismatches:
+        print("OK -- queue state matches Apple Reminders")
+    else:
+        for m in mismatches:
+            print(m)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="reminders_cli", description="iCloud Reminders CLI")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -731,6 +1092,51 @@ def main():
     p_del = sub.add_parser("delete", help="Complete/delete a reminder")
     p_del.add_argument("guid")
 
+    # Queue subcommands
+    p_qu = sub.add_parser("queue-upsert", help="Create or update a queue item")
+    p_qu.add_argument("key")
+    p_qu.add_argument("--title")
+    p_qu.add_argument("--list", default="Sebastian")
+    p_qu.add_argument("--section")
+    p_qu.add_argument("--tag", dest="tag", action="append", default=[])
+    p_qu.add_argument("--priority", choices=["high","medium","low","none"])
+    p_qu.add_argument("--executor")
+    p_qu.add_argument("--hours-budget", dest="hours_budget", type=float)
+    p_qu.add_argument("--tokens-budget", dest="tokens_budget", type=int)
+    p_qu.add_argument("--status")
+    p_qu.add_argument("--item", action="append", default=[])
+    p_qu.add_argument("--blocked",   dest="blocked",   action="store_true", default=False)
+    p_qu.add_argument("--unblocked", dest="unblocked", action="store_true", default=False)
+    p_qu.add_argument("--due")
+    p_qu.add_argument("--flagged",   dest="flagged",   action="store_true", default=False)
+    p_qu.add_argument("--unflagged", dest="unflagged", action="store_true", default=False)
+
+    sub.add_parser("queue-state-json", help="Dump all queue items as JSON")
+
+    p_qc = sub.add_parser("queue-complete", help="Mark queue item complete")
+    p_qc.add_argument("key")
+
+    p_qd = sub.add_parser("queue-delete", help="Delete (abandon) a queue item")
+    p_qd.add_argument("key")
+
+    p_qcu = sub.add_parser("queue-child-upsert", help="Create or update a child task")
+    p_qcu.add_argument("parent_key")
+    p_qcu.add_argument("child_key")
+    p_qcu.add_argument("--title", required=True)
+    p_qcu.add_argument("--due")
+    p_qcu.add_argument("--priority", choices=["high","medium","low","none"])
+    p_qcu.add_argument("--flagged",   action="store_true", default=False)
+    p_qcu.add_argument("--unflagged", action="store_true", default=False)
+
+    p_qcc = sub.add_parser("queue-child-complete", help="Complete a child task")
+    p_qcc.add_argument("parent_key")
+    p_qcc.add_argument("child_key")
+
+    p_qr = sub.add_parser("queue-refresh", help="Re-render and push notes for a queue item")
+    p_qr.add_argument("key")
+
+    sub.add_parser("queue-audit", help="Compare queue DB with Apple Reminders")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -740,6 +1146,14 @@ def main():
     cmds = {
         "auth": cmd_auth, "sync": cmd_sync, "lists": cmd_lists,
         "list": cmd_list, "add": cmd_add, "edit": cmd_edit, "delete": cmd_delete,
+        "queue-upsert": cmd_queue_upsert,
+        "queue-state-json": cmd_queue_state_json,
+        "queue-complete": cmd_queue_complete,
+        "queue-delete": cmd_queue_delete,
+        "queue-child-upsert": cmd_queue_child_upsert,
+        "queue-child-complete": cmd_queue_child_complete,
+        "queue-refresh": cmd_queue_refresh,
+        "queue-audit": cmd_queue_audit,
     }
     try:
         cmds[args.command](args, api)
