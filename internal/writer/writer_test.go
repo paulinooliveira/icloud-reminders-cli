@@ -543,11 +543,11 @@ func TestFindReminderByTitleFiltersByListAndTopLevel(t *testing.T) {
 	}
 }
 
-func TestResolveParentRefAcceptsTitle(t *testing.T) {
+func TestResolveParentRefAcceptsIDOnly(t *testing.T) {
 	engine := &iclouddsync.Engine{
 		Cache: &cache.Cache{
 			Reminders: map[string]*cache.ReminderData{
-				"Reminder/explorer-top": {
+				"Reminder/11111111-1111-1111-1111-111111111111": {
 					Title:   "explorer",
 					ListRef: strPtr("List/sebastian"),
 				},
@@ -555,8 +555,11 @@ func TestResolveParentRefAcceptsTitle(t *testing.T) {
 		},
 	}
 
-	if got := resolveParentRef(engine, "explorer", "List/sebastian"); got != "Reminder/explorer-top" {
-		t.Fatalf("title parent resolution mismatch: got %q", got)
+	if got := resolveParentRef(engine, "Reminder/11111111-1111-1111-1111-111111111111", "List/sebastian"); got != "Reminder/11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("id parent resolution mismatch: got %q", got)
+	}
+	if got := resolveParentRef(engine, "explorer", "List/sebastian"); got != "" {
+		t.Fatalf("title parent resolution should be rejected when id-only mode is enforced: got %q", got)
 	}
 }
 
@@ -627,10 +630,11 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	}
 	defer os.Setenv("PATH", oldPath)
 
+	testReminderID := "11111111-1111-1111-1111-111111111111"
 	engine := &iclouddsync.Engine{
 		Cache: &cache.Cache{
 			Reminders: map[string]*cache.ReminderData{
-				"Reminder/ABC": {
+				"Reminder/" + testReminderID: {
 					Title: "Original title",
 					Notes: strPtr("Original body"),
 				},
@@ -643,14 +647,14 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	w := &Writer{Sync: engine}
 	bridge := applebridge.New(&applebridge.Config{Host: "example-host", User: "tester", IdentityPath: "/tmp/key"})
 
-	result, err := w.SafeTextEditReminder("ABC", strPtr("Updated title"), strPtr("Updated body"), bridge)
+	result, err := w.SafeTextEditReminder("Reminder/"+testReminderID, strPtr("Updated title"), strPtr("Updated body"), bridge)
 	if err != nil {
 		t.Fatalf("SafeTextEditReminder error: %v", err)
 	}
 	if errMsg, ok := result["error"].(string); ok {
 		t.Fatalf("unexpected result error: %s", errMsg)
 	}
-	rd := w.Sync.Cache.Reminders["Reminder/ABC"]
+	rd := w.Sync.Cache.Reminders["Reminder/"+testReminderID]
 	if rd == nil {
 		t.Fatal("expected updated cache entry")
 	}
@@ -660,7 +664,7 @@ func TestSafeTextEditReminderUsesAppleBridgeAndUpdatesCache(t *testing.T) {
 	if rd.Notes == nil || *rd.Notes != "Updated body" {
 		t.Fatalf("notes mismatch: %#v", rd.Notes)
 	}
-	if alias := w.Sync.Cache.Reminders["ABC"]; alias == nil || alias.Title != "Updated title" {
+	if alias := w.Sync.Cache.Reminders[testReminderID]; alias == nil || alias.Title != "Updated title" {
 		t.Fatalf("expected alias cache update, got %#v", alias)
 	}
 }

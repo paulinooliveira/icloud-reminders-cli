@@ -275,5 +275,5 @@ func newDeleteTestWriter(t *testing.T, server *deleteTestServer) (*Writer, strin
 	engine.Cache.Reminders[strings.TrimPrefix(server.reminderID, "Reminder/")] = &cache.ReminderData{}
 
 	client := cloudkit.NewWithHTTPClient(server.URL(), server.srv.Client())
-	return New(client, engine), rd.Title, server.reminderID, func() {}
+	return New(client, engine), server.reminderID, server.reminderID, func() {}
 }

@@ -255,21 +255,9 @@ func replayOperation(db *sql.DB, op *store.Operation) error {
 				changes.Flagged = &flagged
 			}
 			if payload.Parent != "" {
-				fullID := syncEngine.FindReminderByID(payload.ReminderID)
-				listID := ""
-				if current := syncEngine.Cache.Reminders[fullID]; current != nil && current.ListRef != nil {
-					listID = *current.ListRef
-				}
-				parentRef := ""
-				if rid := syncEngine.FindReminderByID(payload.Parent); rid != "" {
-					parentRef = rid
-				} else if rid := syncEngine.FindReminderByTitle(payload.Parent, listID, true); rid != "" {
-					parentRef = rid
-				} else if rid := syncEngine.FindReminderByTitle(payload.Parent, "", true); rid != "" {
-					parentRef = rid
-				}
+				parentRef := syncEngine.FindReminderByID(payload.Parent)
 				if parentRef == "" {
-					return mutationOutcome{}, fmt.Errorf("parent reminder %q not found", payload.Parent)
+					return mutationOutcome{}, fmt.Errorf("parent reminder %q not found by id", payload.Parent)
 				}
 				changes.ParentRef = &parentRef
 			}

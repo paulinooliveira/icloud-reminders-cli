@@ -958,44 +958,64 @@ func resolveParentRef(engine *sync.Engine, parentHint string, listID string) str
 	if parentHint == "" {
 		return ""
 	}
-	if rid := engine.FindReminderByID(parentHint); rid != "" {
-		return rid
-	}
-	if rid := engine.FindReminderByTitle(parentHint, listID, true); rid != "" {
-		return rid
-	}
-	if rid := engine.FindReminderByTitle(parentHint, "", true); rid != "" {
-		return rid
+	if rid := normalizeReminderID(parentHint); rid != "" {
+		if _, ok := engine.Cache.Reminders[rid]; ok {
+			return rid
+		}
 	}
 	return ""
 }
 
 func (w *Writer) resolveReminderRecord(reminderHint string) (string, *cache.ReminderData, error) {
-	if rid := w.Sync.FindReminderByID(reminderHint); rid != "" {
-		return w.canonicalizeReminderRecord(rid, w.Sync.Cache.Reminders[rid])
-	}
-	if rid := w.Sync.FindReminderByTitle(reminderHint, "", false); rid != "" {
-		return w.canonicalizeReminderRecord(rid, w.Sync.Cache.Reminders[rid])
-	}
-
-	ownerID, err := w.ownerID()
-	if err != nil {
-		return "", nil, err
-	}
-	for _, recordName := range reminderLookupCandidates(reminderHint) {
-		record, err := lookupRecord(w.CK, ownerID, recordName)
-		if err != nil {
-			continue
+	if reminderID := normalizeReminderID(reminderHint); reminderID != "" {
+		if _, ok := w.Sync.Cache.Reminders[reminderID]; ok {
+			return w.canonicalizeReminderRecord(reminderID, w.Sync.Cache.Reminders[reminderID])
 		}
-		fullID, _ := record["recordName"].(string)
-		if fullID == "" {
-			fullID = recordName
+		if fullID, rd, ok := w.lookupReminderRecordByID(reminderID); ok && fullID != "" {
+			return w.canonicalizeReminderRecord(fullID, rd)
 		}
-		rd := reminderDataFromRecord(record)
-		w.Sync.Cache.Reminders[fullID] = rd
-		return fullID, rd, nil
 	}
 	return "", nil, fmt.Errorf("reminder %q not found", reminderHint)
+}
+
+func (w *Writer) lookupReminderRecordByID(recordName string) (string, *cache.ReminderData, bool) {
+	if recordName == "" {
+		return "", nil, false
+	}
+	ownerID, err := w.ownerID()
+	if err != nil {
+		return "", nil, false
+	}
+	record, err := lookupRecord(w.CK, ownerID, recordName)
+	if err != nil {
+		return "", nil, false
+	}
+	fullID, _ := record["recordName"].(string)
+	if fullID == "" {
+		fullID = recordName
+	}
+	rd := reminderDataFromRecord(record)
+	w.Sync.Cache.Reminders[fullID] = rd
+	return fullID, rd, true
+}
+
+func normalizeReminderID(hint string) string {
+	hint = strings.TrimSpace(hint)
+	if hint == "" {
+		return ""
+	}
+	hintUpper := strings.ToUpper(hint)
+	if strings.HasPrefix(hintUpper, "REMINDER/") {
+		uuid := shortID(hintUpper)
+		if !looksLikeUUID(uuid) {
+			return ""
+		}
+		return "Reminder/" + uuid
+	}
+	if looksLikeUUID(hint) {
+		return "Reminder/" + strings.ToUpper(hint)
+	}
+	return ""
 }
 
 func (w *Writer) canonicalizeReminderRecord(recordName string, rd *cache.ReminderData) (string, *cache.ReminderData, error) {

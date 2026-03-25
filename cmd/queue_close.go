@@ -21,7 +21,7 @@ var queueCompleteCmd = &cobra.Command{
 				Key string `json:"key"`
 			}{Key: key}
 			if err := executeMutation("queue-complete", "queue", key, payload, false, func() (mutationOutcome, error) {
-				bridge, cfg, err := loadOptionalValidatorBridge()
+				_, cfg, err := loadOptionalValidatorBridge()
 				if err != nil {
 					return mutationOutcome{}, err
 				}
@@ -46,34 +46,7 @@ var queueCompleteCmd = &cobra.Command{
 						return mutationOutcome{}, err
 					}
 				}
-				cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
-				var choice queue.CanonicalChoice
-				cloudID := item.CloudID
-				if cloudID == "" && bridge != nil {
-					listName := "Sebastian"
-					if cfg != nil && cfg.SebastianListName != "" {
-						listName = cfg.SebastianListName
-					}
-					appItems, err := bridge.ListReminders(listName)
-					if err != nil {
-						return mutationOutcome{}, err
-					}
-					matches := queue.FindExactTitleMatches(appItems, item.Title)
-					choice = queue.ChooseCanonical(matches, cloudByUUID, item, nil)
-					for _, dup := range choice.Delete {
-						if err := bridge.DeleteReminder(dup.AppleID); err != nil {
-							return mutationOutcome{}, err
-						}
-					}
-				}
-				if cloudID == "" && choice.Keep != nil {
-					if cloud := cloudByUUID[strings.ToUpper(choice.Keep.UUID())]; cloud != nil {
-						cloudID = cloud.ID
-					}
-				}
-				if cloudID == "" {
-					cloudID = syncEngine.FindReminderByTitle(item.Title, listID, false)
-				}
+				cloudID := resolveQueueCloudID(item.CloudID)
 				if cloudID != "" {
 					result, err := completeReminderWithFallback(cloudID)
 					if err != nil {
@@ -82,13 +55,10 @@ var queueCompleteCmd = &cobra.Command{
 					if errMsg, ok := result["error"].(string); ok && errMsg != "" {
 						return mutationOutcome{}, fmt.Errorf("%s", errMsg)
 					}
-				} else if bridge != nil && choice.Keep != nil {
-					completed := true
-					if err := bridge.UpdateReminder(choice.Keep.AppleID, nil, nil, &completed); err != nil {
-						return mutationOutcome{}, err
-					}
-				} else {
-					return mutationOutcome{}, fmt.Errorf("queue key %q has no visible or cloud-backed reminder to complete", key)
+				} else if cfg != nil && strings.TrimSpace(cfg.SebastianListID) == "" {
+					return mutationOutcome{}, fmt.Errorf("queue key %q has no stable cloud id; set a default Sebastian list in config or resync state", key)
+				} else if cfg == nil {
+					return mutationOutcome{}, fmt.Errorf("queue key %q has no stable cloud id to complete", key)
 				}
 				delete(state.Items, key)
 				for sessionKey, boundKey := range state.Bindings {
@@ -148,33 +118,11 @@ var queueDeleteCmd = &cobra.Command{
 						return mutationOutcome{}, err
 					}
 				}
-				cloudByUUID := queue.BuildCloudByUUID(syncEngine.GetReminders(true), listID)
-				var choice queue.CanonicalChoice
-				cloudID := item.CloudID
-				listName := "Sebastian"
-				if cfg != nil && cfg.SebastianListName != "" {
-					listName = cfg.SebastianListName
-				}
-				if bridge != nil && cloudID == "" {
-					appItems, err := bridge.ListReminders(listName)
-					if err != nil {
-						return mutationOutcome{}, err
-					}
-					matches := queue.FindExactTitleMatches(appItems, item.Title)
-					choice = queue.ChooseCanonical(matches, cloudByUUID, item, nil)
-					for _, dup := range choice.Delete {
-						if err := bridge.DeleteReminder(dup.AppleID); err != nil {
-							return mutationOutcome{}, err
-						}
-					}
-				}
-				if cloudID == "" && choice.Keep != nil {
-					if cloud := cloudByUUID[strings.ToUpper(choice.Keep.UUID())]; cloud != nil {
-						cloudID = cloud.ID
-					}
-				}
-				if cloudID == "" {
-					cloudID = syncEngine.FindReminderByTitle(item.Title, listID, false)
+				cloudID := resolveQueueCloudID(item.CloudID)
+				if cloudID == "" && bridge == nil {
+					// Keep behavior explicit: without stable id and without bridge access, we cannot
+					// safely identify and delete the live reminder.
+					return mutationOutcome{}, fmt.Errorf("queue key %q has no stable cloud id and no bridge access", key)
 				}
 				if cloudID != "" {
 					result, err := w.DeleteReminder(cloudID)
@@ -185,8 +133,8 @@ var queueDeleteCmd = &cobra.Command{
 						return mutationOutcome{}, fmt.Errorf("%s", errMsg)
 					}
 				}
-				if bridge != nil && choice.Keep != nil {
-					if err := bridge.DeleteReminder(choice.Keep.AppleID); err != nil && !applebridge.IsNotFoundError(err) {
+				if bridge != nil && cloudID == "" {
+					if err := bridge.DeleteReminder(item.AppleID); err != nil && !applebridge.IsNotFoundError(err) {
 						return mutationOutcome{}, err
 					}
 				}

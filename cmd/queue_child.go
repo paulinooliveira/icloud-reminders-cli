@@ -9,7 +9,6 @@ import (
 
 	"icloud-reminders/internal/queue"
 	"icloud-reminders/internal/writer"
-	"icloud-reminders/pkg/models"
 )
 
 var (
@@ -190,21 +189,7 @@ func upsertQueueChild(state *queue.State, parentKey, childKey, title string, due
 		childState.Flagged = *flagged
 	}
 
-	children := listChildrenForParent(parentCloudID)
-	candidate := chooseCanonicalChild(children, childState, title)
-	for _, duplicate := range duplicateChildren(children, candidate, title) {
-		result, err := w.DeleteReminder(duplicate.ID)
-		if err != nil {
-			return err
-		}
-		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-			return fmt.Errorf("%s", errMsg)
-		}
-	}
-	childID := childState.CloudID
-	if candidate != nil {
-		childID = candidate.ID
-	}
+	childID := resolveQueueCloudID(childState.CloudID)
 
 	if childID == "" {
 		result, err := w.AddReminder(title, parentListID, deref(due), priorityLabelFromValue(derefPriority(priority, childState.Priority)), "", parentCloudID)
@@ -217,7 +202,7 @@ func upsertQueueChild(state *queue.State, parentKey, childKey, title string, due
 		if created, _ := result["id"].(string); strings.TrimSpace(created) != "" {
 			childID = created
 		}
-	} else if candidate != nil && strings.TrimSpace(candidate.Title) != title {
+	} else if strings.TrimSpace(childState.Title) != title && childState.CloudID != "" {
 		result, err := w.EditReminder(childID, writer.ReminderChanges{Title: &title})
 		if err != nil {
 			return err
@@ -264,7 +249,7 @@ func completeQueueChild(state *queue.State, parentKey, childKey string, loud boo
 	if !ok {
 		return fmt.Errorf("queue child %q not found under %q", childKey, parentKey)
 	}
-	childID := resolveChildQueueCloudID(parentItem, childState)
+	childID := resolveChildQueueCloudID(childState)
 	if childID == "" {
 		return fmt.Errorf("queue child %q under %q has no resolved cloud id", childKey, parentKey)
 	}
@@ -292,7 +277,7 @@ func deleteQueueChild(state *queue.State, parentKey, childKey string, loud bool)
 	if !ok {
 		return fmt.Errorf("queue child %q not found under %q", childKey, parentKey)
 	}
-	childID := resolveChildQueueCloudID(parentItem, childState)
+	childID := resolveChildQueueCloudID(childState)
 	if childID != "" {
 		result, err := w.DeleteReminder(childID)
 		if err != nil {
@@ -311,15 +296,7 @@ func deleteQueueChild(state *queue.State, parentKey, childKey string, loud bool)
 }
 
 func resolveParentQueueCloudID(parentItem queue.StateItem) string {
-	if parentItem.CloudID != "" {
-		if syncEngine.Cache.Reminders[parentItem.CloudID] != nil {
-			return parentItem.CloudID
-		}
-	}
-	if candidate := syncEngine.FindReminderByTitle(parentItem.Title, "", false); candidate != "" {
-		return candidate
-	}
-	return ""
+	return resolveQueueCloudID(parentItem.CloudID)
 }
 
 func resolveParentQueueListID(parentCloudID string) string {
@@ -329,78 +306,8 @@ func resolveParentQueueListID(parentCloudID string) string {
 	return ""
 }
 
-func resolveChildQueueCloudID(parentItem queue.StateItem, childState queue.ChildStateItem) string {
-	if childState.CloudID != "" && syncEngine.Cache.Reminders[childState.CloudID] != nil {
-		return childState.CloudID
-	}
-	parentCloudID := resolveParentQueueCloudID(parentItem)
-	if parentCloudID == "" {
-		return ""
-	}
-	candidate := chooseCanonicalChild(listChildrenForParent(parentCloudID), childState, childState.Title)
-	if candidate != nil {
-		return candidate.ID
-	}
-	return ""
-}
-
-func listChildrenForParent(parentCloudID string) []*models.Reminder {
-	children := make([]*models.Reminder, 0)
-	for _, reminder := range syncEngine.GetReminders(true) {
-		if reminder == nil || reminder.ParentRef == nil || *reminder.ParentRef != parentCloudID {
-			continue
-		}
-		children = append(children, reminder)
-	}
-	return children
-}
-
-func chooseCanonicalChild(children []*models.Reminder, childState queue.ChildStateItem, desiredTitle string) *models.Reminder {
-	var candidates []*models.Reminder
-	for _, child := range children {
-		if child == nil {
-			continue
-		}
-		if childState.CloudID != "" && child.ID == childState.CloudID {
-			return child
-		}
-		if strings.TrimSpace(desiredTitle) != "" && child.Title == desiredTitle {
-			candidates = append(candidates, child)
-		}
-	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	best := candidates[0]
-	bestTS := reminderModifiedTS(best)
-	for _, child := range candidates[1:] {
-		if ts := reminderModifiedTS(child); ts > bestTS {
-			best = child
-			bestTS = ts
-		}
-	}
-	return best
-}
-
-func duplicateChildren(children []*models.Reminder, keep *models.Reminder, desiredTitle string) []*models.Reminder {
-	duplicates := make([]*models.Reminder, 0)
-	for _, child := range children {
-		if child == nil || child.Title != desiredTitle {
-			continue
-		}
-		if keep != nil && child.ID == keep.ID {
-			continue
-		}
-		duplicates = append(duplicates, child)
-	}
-	return duplicates
-}
-
-func reminderModifiedTS(reminder *models.Reminder) int64 {
-	if reminder == nil || reminder.ModifiedTS == nil {
-		return 0
-	}
-	return *reminder.ModifiedTS
+func resolveChildQueueCloudID(childState queue.ChildStateItem) string {
+	return resolveQueueCloudID(childState.CloudID)
 }
 
 func derefPriority(priority *int, fallback int) int {

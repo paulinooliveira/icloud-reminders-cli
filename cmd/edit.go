@@ -115,21 +115,9 @@ Examples:
 				changes.Flagged = &flagged
 			}
 			if cmd.Flags().Changed("parent") {
-				fullID := syncEngine.FindReminderByID(reminderID)
-				listID := ""
-				if current := syncEngine.Cache.Reminders[fullID]; current != nil && current.ListRef != nil {
-					listID = *current.ListRef
-				}
-				parentRef := ""
-				if rid := syncEngine.FindReminderByID(editParent); rid != "" {
-					parentRef = rid
-				} else if rid := syncEngine.FindReminderByTitle(editParent, listID, true); rid != "" {
-					parentRef = rid
-				} else if rid := syncEngine.FindReminderByTitle(editParent, "", true); rid != "" {
-					parentRef = rid
-				}
+				parentRef := syncEngine.FindReminderByID(editParent)
 				if parentRef == "" {
-					return mutationOutcome{}, fmt.Errorf("parent reminder %q not found", editParent)
+					return mutationOutcome{}, fmt.Errorf("parent reminder %q not found by id", editParent)
 				}
 				changes.ParentRef = &parentRef
 			}
@@ -181,7 +169,7 @@ func init() {
 	editCmd.Flags().StringVarP(&editDue, "due", "d", "", "New due date or datetime (YYYY-MM-DD, YYYY-MM-DDTHH:MM, or RFC3339)")
 	editCmd.Flags().StringVarP(&editNotes, "notes", "n", "", "New notes")
 	editCmd.Flags().StringVarP(&editPriority, "priority", "p", "", "New priority (high, medium, low, none)")
-	editCmd.Flags().StringVar(&editParent, "parent", "", "New parent reminder title or ID")
+	editCmd.Flags().StringVar(&editParent, "parent", "", "New parent reminder id")
 	editCmd.Flags().BoolVar(&editFlagged, "flagged", false, "Mark the reminder flagged")
 	editCmd.Flags().BoolVar(&editUnflagged, "unflagged", false, "Clear the reminder flagged state")
 	editCmd.Flags().BoolVar(&unsafeTextEdit, "unsafe-text-edit", false, "Deprecated debug flag; normal title/note edits use the CloudKit-safe path")
