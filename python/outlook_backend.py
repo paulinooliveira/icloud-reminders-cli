@@ -28,7 +28,7 @@ from typing import Any
 CONFIG_DIR   = Path.home() / ".config" / "icloud-reminders"
 OUTLOOK_CONF = CONFIG_DIR / "outlook.json"
 
-GRAPH_SCOPES = ["Tasks.ReadWrite", "User.Read", "offline_access"]
+GRAPH_SCOPES = ["Tasks.ReadWrite", "User.Read"]
 GRAPH_BASE   = "https://graph.microsoft.com/v1.0"
 
 PRIORITY_TO_GRAPH      = {0: "normal", 1: "high", 5: "normal", 9: "low"}
