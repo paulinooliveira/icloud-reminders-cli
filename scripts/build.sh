@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")/.."
-echo "Building icloud-reminders Go binary..."
-go build -o ./scripts/reminders ./cmd/reminders
-echo "✅ Built: $(pwd)/scripts/reminders"

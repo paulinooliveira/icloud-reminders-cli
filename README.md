@@ -68,6 +68,14 @@ bash scripts/reminders.sh move outlook-task:<list_id>:<task_id> --list Tasks
 bash scripts/reminders.sh delete outlook-task:<list_id>:<task_id>
 ```
 
+## Operating Model
+
+- Outlook is the only source of truth
+- there is no local queue, SQLite state, or background sync layer
+- task refs are opaque CLI IDs and should be reused exactly as returned
+- moving a task creates a new task in the target list and deletes the source, so the task ref changes
+- Outlook can lag briefly after writes, especially after `move`; re-read after a short delay rather than trying to maintain local shadow state
+
 ## Task IDs
 
 Task references are opaque strings of the form:
@@ -82,6 +90,13 @@ Pass these to `edit` and `delete`. They are printed by `add` and `list`.
 
 Outlook supports three practical priority levels: `high`, `medium`, and `low`.
 The CLI still accepts `none` as a compatibility alias, but it maps to `medium`.
+
+## Not Supported
+
+- tags / hashtags
+- flagging
+- queue commands
+- local-first sync or SQLite task state
 
 ## State Files
 

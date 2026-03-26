@@ -187,6 +187,30 @@ def cmd_delete(args: Any, client: Any) -> None:
     print(f"Deleted: {args.guid}")
 
 
+def cmd_complete(args: Any, client: Any) -> None:
+    from outlook_backend import complete_task, decode_task_ref
+
+    try:
+        list_id, task_id = decode_task_ref(args.guid)
+    except ValueError as exc:
+        die(str(exc))
+
+    complete_task(client, list_id, task_id)
+    print(f"Completed: {args.guid}")
+
+
+def cmd_reopen(args: Any, client: Any) -> None:
+    from outlook_backend import decode_task_ref, update_task
+
+    try:
+        list_id, task_id = decode_task_ref(args.guid)
+    except ValueError as exc:
+        die(str(exc))
+
+    update_task(client, list_id, task_id, completed=False)
+    print(f"Reopened: {args.guid}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="reminders_cli",
@@ -225,6 +249,12 @@ def main() -> None:
     p_delete = sub.add_parser("delete", help="Delete a task")
     p_delete.add_argument("guid")
 
+    p_complete = sub.add_parser("complete", help="Mark a task complete")
+    p_complete.add_argument("guid")
+
+    p_reopen = sub.add_parser("reopen", help="Reopen a completed task")
+    p_reopen.add_argument("guid")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -246,6 +276,8 @@ def main() -> None:
         "edit": cmd_edit,
         "move": cmd_move,
         "delete": cmd_delete,
+        "complete": cmd_complete,
+        "reopen": cmd_reopen,
     }
     try:
         commands[args.command](args, client)
