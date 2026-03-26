@@ -34,3 +34,5 @@ dist/
 build/
 icloud-reminders-new
 python/.venv/
+
+.venv/

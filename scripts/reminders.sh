@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# iCloud Reminders CLI
-# First run: ./scripts/reminders.sh auth  (interactive 2FA setup)
+# Outlook Tasks CLI (Python entrypoint)
 
-set -e
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GO_BIN="$SCRIPT_DIR/reminders"
-CREDS_FILE="$HOME/.config/icloud-reminders/credentials"
+REPO_DIR="$SCRIPT_DIR/.."
+VENV_PYTHON="$REPO_DIR/.venv/bin/python3"
+PYTHON_CLI="$REPO_DIR/python/reminders_cli.py"
 
-# Load credentials into environment
-if [[ -f "$CREDS_FILE" ]]; then
-  # shellcheck source=/dev/null
-  source "$CREDS_FILE"
+if [[ ! -f "$PYTHON_CLI" ]]; then
+  echo "Missing Python CLI at $PYTHON_CLI" >&2
+  exit 1
 fi
 
-# Build Go binary if missing
-if [[ ! -x "$GO_BIN" ]]; then
-  echo "Building Go binary..." >&2
-  bash "$SCRIPT_DIR/build.sh" >&2
+if [[ -x "$VENV_PYTHON" ]]; then
+  PYTHON_BIN="$VENV_PYTHON"
+elif [[ -n "${PYTHON_BIN:-}" && -x "$PYTHON_BIN" ]]; then
+  : # use caller-supplied PYTHON_BIN
+else
+  PYTHON_BIN="python3"
 fi
 
-exec "$GO_BIN" "$@"
+exec "$PYTHON_BIN" "$PYTHON_CLI" "$@"
