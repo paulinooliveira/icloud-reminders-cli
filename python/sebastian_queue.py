@@ -229,7 +229,6 @@ class QueueManager:
                 due=child.due,
                 priority=child.priority,
                 flagged=child.flagged,
-                parent_id=parent.cloud_id or None,
             )
             child.cloud_id = result.get("id", "")
 
