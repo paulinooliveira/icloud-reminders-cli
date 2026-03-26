@@ -27,12 +27,15 @@ from typing import Any
 
 CONFIG_DIR   = Path.home() / ".config" / "icloud-reminders"
 OUTLOOK_CONF = CONFIG_DIR / "outlook.json"
+OUTLOOK_TOKEN_CACHE = CONFIG_DIR / "outlook_token_cache.json"
 
 GRAPH_SCOPES = ["Tasks.ReadWrite", "User.Read"]
 GRAPH_BASE   = "https://graph.microsoft.com/v1.0"
+GRAPH_AUTHORITY = "https://login.microsoftonline.com/consumers"
 
 PRIORITY_TO_GRAPH      = {0: "normal", 1: "high", 5: "normal", 9: "low"}
-IMPORTANCE_TO_PRIORITY = {"high": 1, "normal": 0, "low": 9}
+IMPORTANCE_TO_PRIORITY = {"high": 1, "normal": 5, "low": 9}
+PRIORITY_LABEL = {0: "medium", 1: "high", 5: "medium", 9: "low"}
 
 
 # ── Opaque ref helpers ──────────────────────────────────────────────────
@@ -80,22 +83,32 @@ def save_outlook_conf(conf: dict) -> None:
 
 # ── Auth helpers ────────────────────────────────────────────────────────
 
-def _build_credential(client_id: str) -> Any:
-    from azure.identity import DeviceCodeCredential
+def _load_token_cache() -> "Any":
+    import msal
+
+    cache = msal.SerializableTokenCache()
+    if OUTLOOK_TOKEN_CACHE.exists():
+        cache.deserialize(OUTLOOK_TOKEN_CACHE.read_text())
+    return cache
+
+
+def _save_token_cache(cache: "Any") -> None:
+    if getattr(cache, "has_state_changed", False):
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        OUTLOOK_TOKEN_CACHE.write_text(cache.serialize())
+
+
+def _build_msal_app(client_id: str) -> tuple["Any", "Any"]:
+    import msal
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    kwargs: dict[str, Any] = {
-        "client_id": client_id,
-        "tenant_id": "consumers",
-    }
-    try:
-        from azure.identity import TokenCachePersistenceOptions  # type: ignore[attr-defined]
-        kwargs["cache_persistence_options"] = TokenCachePersistenceOptions(
-            name="icloud-reminders-outlook",
-            allow_unencrypted_storage=True,
-        )
-    except (ImportError, AttributeError):
-        pass
-    return DeviceCodeCredential(**kwargs)
+    cache = _load_token_cache()
+    app = msal.PublicClientApplication(
+        client_id=client_id,
+        authority=GRAPH_AUTHORITY,
+        token_cache=cache,
+    )
+    return app, cache
 
 
 def get_client() -> "GraphClient":
@@ -111,19 +124,33 @@ def get_client() -> "GraphClient":
             file=sys.stderr,
         )
         sys.exit(1)
-    return GraphClient(_build_credential(client_id))
+    return GraphClient(client_id)
 
 
 # ── Thin synchronous Graph HTTP client ─────────────────────────────────
 
 class GraphClient:
-    """Minimal synchronous REST wrapper backed by azure-identity tokens."""
+    """Minimal synchronous REST wrapper backed by an explicit MSAL file cache."""
 
-    def __init__(self, credential: Any) -> None:
-        self._cred = credential
+    def __init__(self, client_id: str) -> None:
+        self._client_id = client_id
 
     def _token(self) -> str:
-        return self._cred.get_token(*GRAPH_SCOPES).token
+        app, cache = _build_msal_app(self._client_id)
+        accounts = app.get_accounts()
+        result = None
+        if accounts:
+            result = app.acquire_token_silent(GRAPH_SCOPES, account=accounts[0])
+        if not result:
+            flow = app.initiate_device_flow(scopes=GRAPH_SCOPES)
+            if "user_code" not in flow:
+                raise RuntimeError(f"Failed to create device flow: {flow}")
+            print(flow["message"], flush=True)
+            result = app.acquire_token_by_device_flow(flow)
+        _save_token_cache(cache)
+        if "access_token" not in result:
+            raise RuntimeError(result.get("error_description") or result.get("error") or "Authentication failed")
+        return result["access_token"]
 
     def _headers(self) -> dict:
         return {
@@ -216,6 +243,10 @@ def list_tasks(
     return client.get(f"/me/todo/lists/{list_id}/tasks", params=params).get("value", [])
 
 
+def get_task(client: GraphClient, list_id: str, task_id: str) -> dict:
+    return client.get(f"/me/todo/lists/{list_id}/tasks/{task_id}")
+
+
 def create_task(
     client: GraphClient, list_id: str, title: str, *,
     body: str | None = None, due: str | None = None, priority: int = 0,
@@ -260,6 +291,31 @@ def complete_task(client: GraphClient, list_id: str, task_id: str) -> dict:
 
 def delete_task(client: GraphClient, list_id: str, task_id: str) -> None:
     client.delete(f"/me/todo/lists/{list_id}/tasks/{task_id}")
+
+
+def move_task(
+    client: GraphClient, source_ref: str, target_list_name: str
+) -> dict:
+    source_list_id, task_id = decode_task_ref(source_ref)
+    target_list = get_or_create_list(client, target_list_name)
+    target_list_id = target_list["id"]
+    if target_list_id == source_list_id:
+        return {"id": source_ref, "moved": False}
+
+    task = get_task(client, source_list_id, task_id)
+    created = create_task(
+        client,
+        target_list_id,
+        task.get("title", ""),
+        body=(task.get("body") or {}).get("content") or None,
+        due=_parse_due(task.get("dueDateTime")),
+        priority=IMPORTANCE_TO_PRIORITY.get(task.get("importance", "normal"), 5),
+    )
+    delete_task(client, source_list_id, task_id)
+    return {
+        "id": encode_task_ref(target_list_id, created["id"]),
+        "moved": True,
+    }
 
 
 # ── Checklist helpers ───────────────────────────────────────────────────
@@ -412,7 +468,7 @@ def fmt_task(task: dict) -> str:
     if task.get("due"):
         parts.append(f"due:{task['due']}")
     if task.get("priority"):
-        parts.append(f"priority:{PRIORITY_TO_GRAPH.get(task['priority'], 'normal')}")
+        parts.append(f"priority:{PRIORITY_LABEL.get(task['priority'], 'medium')}")
     if task.get("notes"):
         parts.append("notes:" + task["notes"].splitlines()[0][:60])
     return "  " + "  ".join(parts)

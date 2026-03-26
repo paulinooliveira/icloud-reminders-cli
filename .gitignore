@@ -28,6 +28,9 @@ credentials
 # OS
 .DS_Store
 Thumbs.db
+._*
+__pycache__/
+*.pyc
 
 # Build directory
 dist/
@@ -36,3 +39,4 @@ icloud-reminders-new
 python/.venv/
 
 .venv/
+.env

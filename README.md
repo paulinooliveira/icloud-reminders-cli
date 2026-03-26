@@ -1,6 +1,6 @@
 ---
 name: icloud-reminders
-description: Manage Outlook Tasks (Microsoft Graph) via a local-first Python CLI. Syncs natively to Apple Reminders via Outlook account on macOS.
+description: Manage Outlook Tasks (Microsoft Graph) via a thin Python CLI. Syncs natively to Apple Reminders via Outlook account on macOS.
 ---
 
 # Outlook Tasks CLI
@@ -23,6 +23,17 @@ Install dependencies:
 python3 -m pip install -r python/requirements.txt
 ```
 
+Create a repo-local `.env` for the Outlook app settings:
+
+```bash
+cat > .env <<'EOF'
+OUTLOOK_CLIENT_ID=c0b35c2b-0d9d-4d87-ae05-6e02b196a456
+OUTLOOK_ACCOUNT_EMAIL=paulino.oliveira@outlook.fr
+EOF
+```
+
+`scripts/reminders.sh` loads `.env` automatically.
+
 Register a Microsoft Entra app:
 1. Go to https://portal.azure.com > App registrations > New registration
 2. Supported account types: **Personal Microsoft accounts only**
@@ -33,11 +44,11 @@ Register a Microsoft Entra app:
 Then authenticate:
 
 ```bash
-bash scripts/reminders.sh auth --client-id <YOUR_APP_CLIENT_ID>
+bash scripts/reminders.sh auth
 ```
 
 Follow the device-code prompt to sign in as `paulino.oliveira@outlook.fr`.
-The token is cached by azure-identity and reused on subsequent calls.
+The token is cached in `~/.config/icloud-reminders/outlook_token_cache.json` and reused on subsequent calls.
 
 Config is stored at `~/.config/icloud-reminders/outlook.json`.
 
@@ -45,7 +56,7 @@ Config is stored at `~/.config/icloud-reminders/outlook.json`.
 
 ```bash
 # Auth and reads
-bash scripts/reminders.sh auth --client-id <CLIENT_ID>
+bash scripts/reminders.sh auth
 bash scripts/reminders.sh sync
 bash scripts/reminders.sh lists
 bash scripts/reminders.sh list --list Sebastian
@@ -53,18 +64,8 @@ bash scripts/reminders.sh list --list Sebastian
 # Task CRUD (IDs are outlook-task:<list_id>:<task_id> refs)
 bash scripts/reminders.sh add "Buy milk" --list Sebastian --notes "2%" --priority high --due 2026-03-26T18:30
 bash scripts/reminders.sh edit outlook-task:<list_id>:<task_id> --title "Buy oat milk"
+bash scripts/reminders.sh move outlook-task:<list_id>:<task_id> --list Tasks
 bash scripts/reminders.sh delete outlook-task:<list_id>:<task_id>
-
-# Queue workflow (local-first; queue-sync pushes to Outlook)
-bash scripts/reminders.sh queue-upsert morning-briefing --title "Repair Morning Briefing" --hours-budget 1.5 --status "stale for next run"
-bash scripts/reminders.sh queue-state-json
-bash scripts/reminders.sh queue-complete morning-briefing
-bash scripts/reminders.sh queue-delete morning-briefing
-bash scripts/reminders.sh queue-child-upsert morning-briefing refresh --title "Run refresh"
-bash scripts/reminders.sh queue-child-complete morning-briefing refresh
-bash scripts/reminders.sh queue-refresh morning-briefing
-bash scripts/reminders.sh queue-sync --list Sebastian
-bash scripts/reminders.sh queue-audit
 ```
 
 ## Task IDs
@@ -77,17 +78,16 @@ outlook-task:<list_id>:<task_id>
 
 Pass these to `edit` and `delete`. They are printed by `add` and `list`.
 
+## Priority Support
+
+Outlook supports three practical priority levels: `high`, `medium`, and `low`.
+The CLI still accepts `none` as a compatibility alias, but it maps to `medium`.
+
 ## State Files
 
+- `.env`: repo-local environment config (`OUTLOOK_CLIENT_ID`, account email)
 - `~/.config/icloud-reminders/outlook.json`: Outlook client config
-- `~/.config/icloud-reminders/state.db`: local queue/state database
-- `~/.config/icloud-reminders/queue-sync.lock`: queue sync lock
-
-## Queue Model
-
-Queue writes are local-first. `queue-upsert`, `queue-complete`, `queue-delete`,
-and child mutations update local SQLite state immediately. `queue-sync` is the
-explicit Outlook push step.
+- `~/.config/icloud-reminders/outlook_token_cache.json`: Outlook auth token cache
 
 ## Apple Reminders sync
 

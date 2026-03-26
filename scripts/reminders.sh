@@ -7,10 +7,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$SCRIPT_DIR/.."
 VENV_PYTHON="$REPO_DIR/.venv/bin/python3"
 PYTHON_CLI="$REPO_DIR/python/reminders_cli.py"
+ENV_FILE="$REPO_DIR/.env"
 
 if [[ ! -f "$PYTHON_CLI" ]]; then
   echo "Missing Python CLI at $PYTHON_CLI" >&2
   exit 1
+fi
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
 fi
 
 if [[ -x "$VENV_PYTHON" ]]; then
@@ -21,4 +29,4 @@ else
   PYTHON_BIN="python3"
 fi
 
-exec "$PYTHON_BIN" "$PYTHON_CLI" "$@"
+exec "$PYTHON_BIN" -u "$PYTHON_CLI" "$@"
