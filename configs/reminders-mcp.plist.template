@@ -5,17 +5,26 @@
   <key>Label</key><string>com.paulino.icloud-reminders-mcp</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{{BINARY_PATH}}</string><string>mcp</string>
-    <string>--transport</string><string>http</string>
-    <string>--listen</string><string>127.0.0.1:9181</string>
-    <string>--keys-file</string><string>{{KEYS_FILE}}</string>
-    <string>--allowed-host</string><string>{{PUBLIC_HOST}}</string>
+    <string>/usr/bin/ssh</string>
+    <string>-T</string>
+    <string>-n</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>IdentitiesOnly=yes</string>
+    <string>-o</string><string>StrictHostKeyChecking=yes</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-i</string><string>{{SSH_KEY}}</string>
+    <string>localhost</string>
+    <string>reminders-mcp</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>{{HOME}}</string>
     <key>PATH</key><string>{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>REMINDERS_EVENTKIT_NO_PROMPT</key><string>1</string>
   </dict>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
   <key>WorkingDirectory</key><string>{{REPO_ROOT}}</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

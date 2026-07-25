@@ -1,11 +1,9 @@
 package reminders
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"icloud-reminders/pkg/models"
 )
@@ -33,78 +31,29 @@ func TestPaginateCapsLimitAndOffset(t *testing.T) {
 	}
 }
 
-type fakeRunner struct {
-	stdout []byte
-	stderr []byte
-	err    error
-	args   []string
+func TestUniqueReminderRejectsAmbiguousPrefix(t *testing.T) {
+	items := []*models.Reminder{{ID: "abc-one"}, {ID: "abc-two"}}
+	_, err := uniqueReminder(items, "Work", "abc")
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous-prefix error, got %v", err)
+	}
 }
 
-func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, []byte, error) {
-	f.args = append([]string(nil), args...)
-	return f.stdout, f.stderr, f.err
+func TestUniqueReminderPrefersExactID(t *testing.T) {
+	items := []*models.Reminder{{ID: "abc"}, {ID: "abc-two"}}
+	item, err := uniqueReminder(items, "Work", "abc")
+	if err != nil || item.ID != "abc" {
+		t.Fatalf("expected exact match, got item=%+v err=%v", item, err)
+	}
 }
 
-func TestShowUsesExplicitListAndDeclaresTruncation(t *testing.T) {
-	runner := &fakeRunner{stdout: []byte(`[
-      {"id":"1","title":"one","listID":"L","listName":"Work","isCompleted":false},
-      {"id":"2","title":"two","listID":"L","listName":"Work","isCompleted":false}
-    ]`)}
-	service := &RemindctlService{runner: runner}
-	page, err := service.Show(context.Background(), ShowInput{List: "Work", Limit: 1})
+func TestDefaultServiceUsesInProcessEventKit(t *testing.T) {
+	service, err := NewService()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(runner.args, " ") != "show open --list Work --json --no-input" {
-		t.Fatalf("unexpected args: %v", runner.args)
-	}
-	if len(page.Items) != 1 || page.TotalCount != 2 || !page.HasMore {
-		t.Fatalf("unexpected page: %+v", page)
-	}
-}
-
-func TestFindSearchesTheWholeExplicitList(t *testing.T) {
-	values := make([]string, MaxLimit+1)
-	for i := range values {
-		values[i] = fmt.Sprintf(`{"id":"%03d","title":"item","listID":"L","listName":"Work","isCompleted":false}`, i)
-	}
-	runner := &fakeRunner{stdout: []byte("[" + strings.Join(values, ",") + "]")}
-	service := &RemindctlService{runner: runner}
-	item, err := service.Find(context.Background(), "Work", fmt.Sprint(MaxLimit))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if item.ID != fmt.Sprint(MaxLimit) {
-		t.Fatalf("unexpected item: %+v", item)
-	}
-	if strings.Join(runner.args, " ") != "show all --list Work --json --no-input" {
-		t.Fatalf("unexpected args: %v", runner.args)
-	}
-}
-
-func TestCompleteAcceptsRemindctlArrayResponse(t *testing.T) {
-	runner := &fakeRunner{stdout: []byte(`[{"id":"abc","title":"done","listID":"L","listName":"Work","isCompleted":true}]`)}
-	service := &RemindctlService{runner: runner}
-	item, err := service.Complete(context.Background(), "abc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if item.ID != "abc" || !item.Completed {
-		t.Fatalf("unexpected item: %+v", item)
-	}
-}
-
-type blockingRunner struct{}
-
-func (blockingRunner) Run(ctx context.Context, _ ...string) ([]byte, []byte, error) {
-	<-ctx.Done()
-	return nil, nil, ctx.Err()
-}
-
-func TestExecRunnerTimesOut(t *testing.T) {
-	runner := ExecRunner{Path: "/bin/sleep", Timeout: 10 * time.Millisecond}
-	_, _, err := runner.Run(context.Background(), "1")
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("expected timeout, got %v", err)
+	defer service.Close()
+	if _, ok := any(service).(*EventKitService); !ok {
+		t.Fatalf("default service is %T, want *EventKitService", service)
 	}
 }

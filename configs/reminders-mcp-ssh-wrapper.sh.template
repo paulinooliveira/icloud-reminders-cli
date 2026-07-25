@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  reminders-mcp-authorize)
+    exec "{{BINARY_PATH}}" mcp-authorize ;;
+  reminders-mcp|'')
+    ;;
+  *)
+    echo "command not allowed" >&2
+    exit 64 ;;
+esac
+
+exec env \
+  HOME="{{HOME}}" \
+  PATH="{{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  REMINDERS_EVENTKIT_NO_PROMPT=1 \
+  REMINDERS_MCP_REQUIRE_SSH_PARENT=1 \
+  "{{BINARY_PATH}}" mcp \
+  --transport http \
+  --listen 127.0.0.1:9181 \
+  --keys-file "{{KEYS_FILE}}" \
+  --allowed-host "{{PUBLIC_HOST}}"

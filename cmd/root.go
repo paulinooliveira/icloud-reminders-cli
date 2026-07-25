@@ -34,7 +34,7 @@ var RootCmd = &cobra.Command{
 
 		// Commands that handle their own auth (or none)
 		switch cmd.Name() {
-		case "auth", "export-session", "import-session", "mcp":
+		case "auth", "export-session", "import-session", "mcp", "mcp-authorize":
 			return nil
 		}
 

@@ -2,7 +2,14 @@
 
 ## Topology and invariants
 
-`agent + Bearer token -> dedicated Cloudflare Tunnel -> 127.0.0.1:9181/mcp -> remindctl/EventKit`
+`agent + Bearer token -> dedicated Cloudflare Tunnel -> 127.0.0.1:9181/mcp -> in-process EventKit`
+
+The LaunchAgent enters the already-authorized Reminders TCC context through a
+localhost-only SSH session. The installer creates a dedicated key whose
+`authorized_keys` entry is restricted with `from="127.0.0.1,::1"`, `restrict`,
+and one forced wrapper command. It cannot get a TTY, forward ports, forward an
+agent, or run arbitrary commands. SSH is not an agent-facing authentication
+layer; remote agents still authenticate only with the scoped Bearer tokens.
 
 - The MCP process binds only to `127.0.0.1` (or another loopback address).
 - `/mcp` is the only accepted HTTP route.
@@ -15,7 +22,7 @@
 ## 1. Local prerequisites
 
 ```bash
-remindctl status                       # must say Full access
+reminders mcp --transport stdio        # MCP status tool must report eventkit/in-process + Full Access
 go test ./...
 go run ./cmd/reminders-mcp-probe \
   --transport stdio --binary ./scripts/reminders --tool lists
@@ -52,8 +59,9 @@ For additional agents, copy the schema in `configs/reminders-keys.example.json`,
 add the new hash with the minimum lists/write policy, atomically replace
 `~/.config/icloud-reminders/mcp/keys.json`, and preserve mode 0600.
 
-The process reloads a valid changed key file on the next request. A malformed
-reload keeps the last known-good snapshot instead of opening access.
+The process reloads a valid changed key file on the next request. A missing,
+malformed, unreadable, or insecurely permissioned reload revokes every key
+until a valid mode-0600 file is restored (fail closed).
 
 ## 3. Install the loopback MCP service
 
@@ -67,15 +75,30 @@ launchd.
 
 ### macOS permission for the background service
 
-Reminders permission is process-context-specific. `remindctl status` may report
-Full access in Terminal while the LaunchAgent reports `Not determined`. After
-installing, call the remote `status` tool, then open **System Settings → Privacy
-& Security → Reminders** and grant access to the background process shown by
-macOS (the installed `reminders`/`remindctl` chain). Reload it afterward:
+Reminders permission is process-context-specific. An unrelated tool may report
+Full access in Terminal while a direct LaunchAgent process reports `Not
+determined`. The installer therefore uses the macOS-authorized `sshd` context
+through a dedicated localhost-only forced command. After installing, call the
+remote `status` tool. If it is not authorized, request the one-time app grant:
 
 ```bash
+# Run the installed, signed binary once from the interactive session so macOS
+# can associate the consent with its stable identifier/path.
+bash scripts/install-mcp-runtime.sh authorize
+# Click Allow Full Access in the one-time macOS prompt, then reinstall/reload:
+bash scripts/install-mcp-runtime.sh install
 launchctl kickstart -k "gui/$(id -u)/com.paulino.icloud-reminders-mcp"
 ```
+
+If a remote shell cannot present the macOS dialog, run the installer’s
+`authorize` mode from the logged-in desktop session. It opens the installed app
+with the hidden `mcp-authorize` command so the same signed executable that
+serves MCP receives the TCC grant.
+
+The forced SSH wrapper sets `REMINDERS_EVENTKIT_NO_PROMPT=1`: a missing grant
+fails immediately with `authenticated:false` instead of hanging on an invisible
+TCC dialog. The MCP process also exits if its SSH parent disappears, preventing
+an orphan from retaining the loopback port across LaunchAgent restarts.
 
 Do not declare REMOTE_GREEN while remote `status` returns
 `"authenticated": false`. macOS does not provide a supported non-interactive

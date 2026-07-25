@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -28,8 +30,13 @@ var mcpCmd = &cobra.Command{
 			return err
 		}
 		defer service.Close()
-		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer stop()
+		if os.Getenv("REMINDERS_MCP_REQUIRE_SSH_PARENT") == "1" {
+			var cancel context.CancelFunc
+			ctx, cancel = parentBoundContext(ctx, os.Getppid, 250*time.Millisecond)
+			defer cancel()
+		}
 		switch mcpTransport {
 		case "stdio":
 			return mcpserver.New(service, mcpserver.LocalAccess(), version).Run(ctx, &mcp.StdioTransport{})
@@ -46,6 +53,26 @@ var mcpCmd = &cobra.Command{
 			return fmt.Errorf("unsupported MCP transport %q", mcpTransport)
 		}
 	},
+}
+
+func parentBoundContext(parent context.Context, parentPID func() int, interval time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if parentPID() <= 1 {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, cancel
 }
 
 func init() {
