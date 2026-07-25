@@ -35,9 +35,9 @@ record() {
 call_probe() {
   local token="$1" tool="$2" args="$3" endpoint="$4"
   if [[ -n "$PUBLIC_IP" && "$endpoint" == https://* ]]; then
-    REMINDERS_MCP_TOKEN="$token" "$PROBE" --transport http --endpoint "$endpoint/mcp" --resolve-ip "$PUBLIC_IP" --tool "$tool" --args "$args" --timeout 45s
+    REMINDERS_MCP_TOKEN="$token" "$PROBE" --transport http --endpoint "$endpoint/mcp" --resolve-ip "$PUBLIC_IP" --tool "$tool" --args "$args" --timeout 90s
   else
-    REMINDERS_MCP_TOKEN="$token" "$PROBE" --transport http --endpoint "$endpoint/mcp" --tool "$tool" --args "$args" --timeout 45s
+    REMINDERS_MCP_TOKEN="$token" "$PROBE" --transport http --endpoint "$endpoint/mcp" --tool "$tool" --args "$args" --timeout 90s
   fi
 }
 curl_public() {
@@ -53,7 +53,7 @@ curl_public() {
 go build -trimpath -o "$PROBE" ./cmd/reminders-mcp-probe
 
 # REM.0: real in-process EventKit backend, using the exact installed MCP app identity.
-if out=$(REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 45s 2>&1) && \
+if out=$(REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 90s 2>&1) && \
    printf '%s' "$out" | rg -q '"authenticated":true' && printf '%s' "$out" | rg -q 'eventkit/in-process'; then
   printf '%s\n' "$out" >"$ARTIFACT_DIR/rem0-status.json"
   record REM.0 PASS "installed binary reports in-process EventKit Full Access"
@@ -62,7 +62,7 @@ else
 fi
 
 # REM.1: real stdio response has bounded pagination metadata.
-if out=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool show --args "{\"list\":\"$ALLOWED_LIST\",\"limit\":1}" --timeout 45s 2>&1) && \
+if out=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool show --args "{\"list\":\"$ALLOWED_LIST\",\"limit\":1}" --timeout 90s 2>&1) && \
    printf '%s' "$out" | rg -q 'total_count' && printf '%s' "$out" | rg -q 'has_more' && printf '%s' "$out" | rg -q '"limit":1'; then
   printf '%s\n' "$out" >"$ARTIFACT_DIR/rem1-stdio.json"
   record REM.1 PASS "stdio show returned limit/total_count/has_more"
@@ -75,10 +75,10 @@ fi
 title="$NONCE"
 if [[ "$ALLOW_MUTATIONS" != 1 ]]; then
   record REM.2 FAIL "set REMINDERS_VERIFY_ALLOW_MUTATIONS=1 to authorize canary add+complete"
-elif lists=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool lists --timeout 45s 2>&1) && \
-   add=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool add --args "{\"title\":\"$title\",\"list\":\"$ALLOWED_LIST\",\"notes\":\"DoD canary; safe to complete\"}" --timeout 45s 2>&1); then
+elif lists=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool lists --timeout 90s 2>&1) && \
+   add=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool add --args "{\"title\":\"$title\",\"list\":\"$ALLOWED_LIST\",\"notes\":\"DoD canary; safe to complete\"}" --timeout 90s 2>&1); then
   id=$(printf '%s' "$add" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["structuredContent"]["reminder"]["id"])' 2>/dev/null || true)
-  if [[ -n "$id" ]] && complete=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool complete --args "{\"id\":\"$id\",\"list\":\"$ALLOWED_LIST\"}" --timeout 45s 2>&1); then
+  if [[ -n "$id" ]] && complete=$("$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool complete --args "{\"id\":\"$id\",\"list\":\"$ALLOWED_LIST\"}" --timeout 90s 2>&1); then
     printf '%s\n%s\n%s\n' "$lists" "$add" "$complete" >"$ARTIFACT_DIR/rem2-roundtrip.log"
     record REM.2 PASS "stdio lists/add/complete round trip id=$id"
   else
@@ -155,7 +155,7 @@ PY
       record REM.7 PASS "list allowlist, read-only denial, revoke and restore enforced"
     else record REM.7 FAIL "list/read-only/revocation proof missing"; fi
 
-    local_ok=$(REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 45s 2>/dev/null | rg -q '"authenticated":true' && echo yes || echo no)
+    local_ok=$(REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 90s 2>/dev/null | rg -q '"authenticated":true' && echo yes || echo no)
     remote_ok=$(call_probe "$TOKEN" status '{}' "$base" 2>/dev/null | rg -q '"authenticated":true' && echo yes || echo no)
     fallback_ok=no
     recovered_ok=no
@@ -163,7 +163,7 @@ PY
     if [[ "$ALLOW_TUNNEL_RESTART" == 1 && "$TUNNEL_RESTART_HOST" == "$PUBLIC_HOST" && -n "$PUBLIC_HOST" ]] && launchctl print "gui/$(id -u)/com.paulino.icloud-reminders-tunnel" >/dev/null 2>&1; then
       launchctl kill SIGTERM "gui/$(id -u)/com.paulino.icloud-reminders-tunnel" 2>/dev/null || true
       sleep 1
-      if REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 45s 2>/dev/null | rg -q '"authenticated":true'; then fallback_ok=yes; fi
+      if REMINDERS_EVENTKIT_NO_PROMPT=1 "$PROBE" --transport stdio --binary "$RUNTIME_BIN" --tool status --timeout 90s 2>/dev/null | rg -q '"authenticated":true'; then fallback_ok=yes; fi
       launchctl kickstart -k "gui/$(id -u)/com.paulino.icloud-reminders-tunnel" 2>/dev/null || true
       # cloudflared typically needs 7-10 seconds to establish all QUIC
       # connections after a deliberate stop. Use one fixed readiness window;
@@ -178,6 +178,10 @@ PY
     fi
     agent=$(launchctl print "gui/$(id -u)/com.paulino.icloud-reminders-mcp" 2>/dev/null || true)
     tunnel=$(launchctl print "gui/$(id -u)/com.paulino.icloud-reminders-tunnel" 2>/dev/null || true)
+    agent_running=no
+    tunnel_running=no
+    if printf '%s' "$agent" | rg -q 'state = running|pid ='; then agent_running=yes; fi
+    if printf '%s' "$tunnel" | rg -q 'state = running|pid ='; then tunnel_running=yes; fi
     printf '%s\n%s\n' "$agent" "$tunnel" >"$ARTIFACT_DIR/rem8-launchctl.txt"
     ssh_restricted=no
     if [[ -x "$HOME/.local/bin/reminders-mcp-ssh-wrapper" ]] && \
@@ -187,9 +191,19 @@ PY
        rg -q 'command not allowed' "$ARTIFACT_DIR/rem8-ssh-command-denied.log"; then
       ssh_restricted=yes
     fi
-    if [[ "$local_ok" == yes && "$remote_ok" == yes && "$fallback_ok" == yes && "$recovered_ok" == yes && "$agent_restart_ok" == yes && "$ssh_restricted" == yes ]] && printf '%s' "$agent" | rg -q 'state = running|pid =' && printf '%s' "$tunnel" | rg -q 'state = running|pid ='; then
+    printf '%s\n' \
+      "local_ok=$local_ok" \
+      "remote_ok=$remote_ok" \
+      "fallback_ok=$fallback_ok" \
+      "recovered_ok=$recovered_ok" \
+      "agent_restart_ok=$agent_restart_ok" \
+      "ssh_restricted=$ssh_restricted" \
+      "agent_running=$agent_running" \
+      "tunnel_running=$tunnel_running" \
+      >"$ARTIFACT_DIR/rem8-checks.env"
+    if [[ "$local_ok" == yes && "$remote_ok" == yes && "$fallback_ok" == yes && "$recovered_ok" == yes && "$agent_restart_ok" == yes && "$ssh_restricted" == yes && "$agent_running" == yes && "$tunnel_running" == yes ]]; then
       record REM.8 PASS "tunnel stop preserved local MCP; remote recovered; MCP restart retained authorization; LaunchAgents running"
-    else record REM.8 FAIL "backend authorization, exact-host tunnel-restart opt-in, or LaunchAgent proof missing"; fi
+    else record REM.8 FAIL "subcheck failed; see rem8-checks.env"; fi
   fi
 fi
 

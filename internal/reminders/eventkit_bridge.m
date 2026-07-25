@@ -3,6 +3,7 @@
 #include "eventkit_bridge.h"
 
 struct reminders_eventkit_store { EKEventStore *value; };
+static const int64_t EventKitTimeoutSeconds = 60;
 
 static char *copy_string(NSString *value) {
     if (value == nil) return NULL;
@@ -88,13 +89,13 @@ static BOOL ensure_access(EKEventStore *store, char **error_out) {
         }];
 #pragma clang diagnostic pop
     }
-    long waited = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+    long waited = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, EventKitTimeoutSeconds * NSEC_PER_SEC));
 #if !OS_OBJECT_USE_OBJC
     dispatch_release(semaphore);
 #endif
     if (waited != 0) {
         [requestError release];
-        set_error(error_out, @"EventKit authorization timed out after 30s");
+        set_error(error_out, [NSString stringWithFormat:@"EventKit authorization timed out after %llds", EventKitTimeoutSeconds]);
         return NO;
     }
     if (!granted) {
@@ -157,13 +158,13 @@ static NSArray<EKReminder *> *fetch_reminders(EKEventStore *store, EKCalendar *c
         result = [reminders retain];
         dispatch_semaphore_signal(semaphore);
     }];
-    long waited = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+    long waited = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, EventKitTimeoutSeconds * NSEC_PER_SEC));
 #if !OS_OBJECT_USE_OBJC
     dispatch_release(semaphore);
 #endif
     if (waited != 0) {
         [result release];
-        set_error(error_out, @"EventKit reminder fetch timed out after 30s");
+        set_error(error_out, [NSString stringWithFormat:@"EventKit reminder fetch timed out after %llds", EventKitTimeoutSeconds]);
         return nil;
     }
     return [result autorelease];
