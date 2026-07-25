@@ -172,7 +172,9 @@ PY
       sleep 12
       if call_probe "$TOKEN" status '{}' "$base" 2>/dev/null | rg -q '"authenticated":true'; then recovered_ok=yes; fi
       launchctl kickstart -k "gui/$(id -u)/com.paulino.icloud-reminders-mcp" 2>/dev/null || true
-      sleep 3
+      # The LaunchAgent has ThrottleInterval=10; allow one deterministic
+      # scheduling window after replacing its SSH session.
+      sleep 12
       if call_probe "$TOKEN" status '{}' "$base" 2>/dev/null | rg -q '"authenticated":true'; then agent_restart_ok=yes; fi
     fi
     agent=$(launchctl print "gui/$(id -u)/com.paulino.icloud-reminders-mcp" 2>/dev/null || true)
