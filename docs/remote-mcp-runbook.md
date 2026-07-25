@@ -22,16 +22,19 @@ layer; remote agents still authenticate only with the scoped Bearer tokens.
 ## 1. Local prerequisites
 
 ```bash
-reminders mcp --transport stdio        # MCP status tool must report eventkit/in-process + Full Access
 go test ./...
-go run ./cmd/reminders-mcp-probe \
-  --transport stdio --binary ./scripts/reminders --tool lists
+~/.local/bin/reminders-mcp-probe --transport stdio \
+  --binary "$HOME/Applications/Reminders MCP.app/Contents/MacOS/reminders" \
+  --tool status
+~/.local/bin/reminders-mcp-probe --transport stdio \
+  --binary "$HOME/Applications/Reminders MCP.app/Contents/MacOS/reminders" \
+  --tool lists
 ```
 
-Build first if `./scripts/reminders` is absent:
+Install the signed runtime first if those paths are absent:
 
 ```bash
-bash scripts/build.sh
+bash scripts/install-mcp-runtime.sh install
 ```
 
 ## 2. Create per-agent keys

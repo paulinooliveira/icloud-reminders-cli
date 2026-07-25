@@ -4,14 +4,13 @@ package reminders
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"icloud-reminders/pkg/models"
 )
 
 const DefaultLimit = 50
 const MaxLimit = 200
-const DefaultTimeout = 30 * time.Second
 
 type Service interface {
 	Lists(context.Context) ([]*models.ReminderList, error)
@@ -36,7 +35,6 @@ type AddInput struct {
 	Due      string `json:"due,omitempty"`
 	Priority string `json:"priority,omitempty"`
 	Notes    string `json:"notes,omitempty"`
-	Parent   string `json:"parent,omitempty"`
 }
 
 type Page struct {
@@ -77,10 +75,10 @@ func paginate(items []*models.Reminder, limit, offset int) Page {
 func uniqueReminder(items []*models.Reminder, list, id string) (*models.Reminder, error) {
 	matches := make([]*models.Reminder, 0, 1)
 	for _, item := range items {
-		if equalFold(item.ID, id) {
+		if strings.EqualFold(item.ID, id) {
 			return item, nil
 		}
-		if prefixFold(item.ID, id) {
+		if strings.HasPrefix(strings.ToLower(item.ID), strings.ToLower(id)) {
 			matches = append(matches, item)
 		}
 	}

@@ -16,7 +16,6 @@ DENIED_LIST="${REMINDERS_MCP_DENIED_LIST:-Belo}"
 ALLOWED_LIST="${REMINDERS_MCP_ALLOWED_LIST:-mcp-canary}"
 NONCE="REM-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT/exports/rem-evidence/$NONCE}"
-BIN="${REMINDERS_BINARY:-$HOME/.local/bin/reminders}"
 RUNTIME_BIN="${REMINDERS_MCP_RUNTIME_BINARY:-$HOME/Applications/Reminders MCP.app/Contents/MacOS/reminders}"
 PROBE="${REMINDERS_MCP_PROBE:-$ROOT/build/reminders-mcp-probe}"
 KEYS_FILE="${REMINDERS_MCP_KEYS_FILE:-$HOME/.config/icloud-reminders/mcp/keys.json}"
@@ -50,7 +49,7 @@ curl_public() {
   fi
 }
 
-[[ -x "$BIN" ]] || { echo "installed reminders binary not executable: $BIN" >&2; exit 1; }
+[[ -x "$RUNTIME_BIN" ]] || { echo "installed Reminders MCP binary not executable: $RUNTIME_BIN" >&2; exit 1; }
 go build -trimpath -o "$PROBE" ./cmd/reminders-mcp-probe
 
 # REM.0: real in-process EventKit backend, using the exact installed MCP app identity.

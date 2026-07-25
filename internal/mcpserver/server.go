@@ -40,7 +40,6 @@ type addInput struct {
 	Due      string `json:"due,omitempty"`
 	Priority string `json:"priority,omitempty" jsonschema:"One of none low medium high"`
 	Notes    string `json:"notes,omitempty"`
-	Parent   string `json:"parent,omitempty"`
 }
 type completeInput struct {
 	ID   string `json:"id" jsonschema:"required,Reminder ID or unique prefix"`
@@ -103,7 +102,7 @@ func New(service reminders.Service, access Access, version string) *mcp.Server {
 		if err := requireList(access, input.List); err != nil {
 			return nil, reminderOutput{}, err
 		}
-		item, err := service.Add(ctx, reminders.AddInput{Title: input.Title, List: input.List, Due: input.Due, Priority: input.Priority, Notes: input.Notes, Parent: input.Parent})
+		item, err := service.Add(ctx, reminders.AddInput{Title: input.Title, List: input.List, Due: input.Due, Priority: input.Priority, Notes: input.Notes})
 		if err != nil {
 			return nil, reminderOutput{}, err
 		}
