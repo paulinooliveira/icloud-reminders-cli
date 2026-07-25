@@ -1,0 +1,10 @@
+# Render outside git. Never commit the credentials JSON.
+tunnel: {{TUNNEL_ID}}
+credentials-file: {{CREDENTIALS_FILE}}
+
+ingress:
+  - hostname: {{HOSTNAME}}
+    service: http://127.0.0.1:9181
+    originRequest:
+      connectTimeout: 30s
+  - service: http_status:404

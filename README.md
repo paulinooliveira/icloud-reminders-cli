@@ -39,7 +39,7 @@ Download manually for your platform from [GitHub Releases](https://github.com/ta
 
 ### Build from Source
 
-Requires Go 1.22+:
+Requires Go 1.25+ (required by the official MCP Go SDK):
 
 ```bash
 bash scripts/build.sh
@@ -222,3 +222,49 @@ go/
 ## See Also
 
 - [Homebrew Tap Setup](HOMEBREW.md) — maintainer documentation
+
+## MCP access for agents
+
+The existing CloudKit CLI remains supported. A separate, narrow MCP surface uses
+the Mac's authorized `remindctl`/EventKit access so local and remote agents do not
+receive iCloud credentials.
+
+### Local stdio MCP
+
+Build the binary, authorize Reminders, then point an MCP client at the command:
+
+```bash
+go build -o ./scripts/reminders ./cmd/reminders
+remindctl status
+./scripts/reminders mcp --transport stdio
+```
+
+Codex/Claude-style client configuration:
+
+```json
+{
+  "mcpServers": {
+    "icloud-reminders": {
+      "command": "/absolute/path/to/reminders",
+      "args": ["mcp", "--transport", "stdio"]
+    }
+  }
+}
+```
+
+Available tools are deliberately small: `lists`, `show`, `get`, `add`,
+`complete`, and `status`. `show` requires an explicit list and returns
+`total_count`, `limit`, `offset`, and `has_more`; the default page is 50 and the
+maximum is 200. `remindctl` 0.2.0 still reads the complete selected list before
+the response is sliced, so very large lists can take several seconds.
+
+### Remote MCP
+
+Remote access is Streamable HTTP on a loopback-only origin. Every client gets a
+Bearer token whose SHA-256 hash, list allowlist, and write permission live in a
+mode-0600 key file. Keys default to read-only by configuration; writes require
+`"write": true`. A dedicated Cloudflare Tunnel publishes only `/mcp` and never
+shares the ERPNext or Hindsight tunnel.
+
+See [the remote runbook](docs/remote-mcp-runbook.md) for key generation,
+LaunchAgent/tunnel installation, verification, revocation, and rollback.

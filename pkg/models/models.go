@@ -22,6 +22,14 @@ type Reminder struct {
 	ModifiedTS     *int64   `json:"modified_ts,omitempty"`
 }
 
+// ListRefValue returns the record name backing ListRef, or an empty string.
+func (r *Reminder) ListRefValue() string {
+	if r.ListRef == nil {
+		return ""
+	}
+	return *r.ListRef
+}
+
 // PriorityLabel returns a human-readable priority string.
 func (r *Reminder) PriorityLabel() string {
 	switch r.Priority {

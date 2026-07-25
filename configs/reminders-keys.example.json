@@ -1,0 +1,18 @@
+{
+  "keys": [
+    {
+      "id": "agent-read-only",
+      "key_hash": "REPLACE_WITH_SHA256_HEX",
+      "lists": ["mcp-canary"],
+      "write": false,
+      "enabled": true
+    },
+    {
+      "id": "agent-writer",
+      "key_hash": "REPLACE_WITH_SHA256_HEX",
+      "lists": ["mcp-canary"],
+      "write": true,
+      "enabled": true
+    }
+  ]
+}

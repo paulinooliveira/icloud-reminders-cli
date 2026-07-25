@@ -1,6 +1,7 @@
 # Binaries
-icloud-reminders
-reminders
+/icloud-reminders
+/reminders
+/scripts/reminders
 *.exe
 
 # Go build artifacts
@@ -15,8 +16,12 @@ reminders
 # Config and cache files (user-specific)
 config/
 *.json
+!configs/*.example.json
 session.json
 credentials
+
+# Local verification evidence and rendered runtime state
+exports/
 
 # IDE
 .vscode/
