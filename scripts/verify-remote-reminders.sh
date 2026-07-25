@@ -206,6 +206,6 @@ doc={"nonce":nonce,"mode":mode,"git_sha":cmd("git","rev-parse","HEAD"),"git_stat
      "passed":int(passed),"failed":int(failed),"results":results}
 with open(path,"w") as f: json.dump(doc,f,indent=2,sort_keys=True)
 PY
-find "$ARTIFACT_DIR" -type f -maxdepth 1 -print0 | sort -z | xargs -0 shasum -a 256 >"$ARTIFACT_DIR/SHA256SUMS"
+find "$ARTIFACT_DIR" -type f -maxdepth 1 ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 >"$ARTIFACT_DIR/SHA256SUMS"
 printf 'evidence=%s passed=%d failed=%d\n' "$ARTIFACT_DIR" "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
