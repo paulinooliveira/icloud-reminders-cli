@@ -72,6 +72,7 @@ func (f *fakeService) Complete(_ context.Context, id string) (*models.Reminder, 
 	copy.Completed = true
 	return &copy, nil
 }
+func (f *fakeService) Delete(context.Context, string) error { return nil }
 func (f *fakeService) Status(context.Context) reminders.Status {
 	return reminders.Status{Authenticated: true, Backend: "fake"}
 }

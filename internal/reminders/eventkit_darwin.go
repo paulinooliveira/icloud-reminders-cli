@@ -142,6 +142,21 @@ func (s *EventKitService) Complete(_ context.Context, id string) (*models.Remind
 	return &item, nil
 }
 
+func (s *EventKitService) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	var nativeErr *C.char
+	if C.reminders_eventkit_delete(s.store, cID, &nativeErr) == 0 {
+		return bridgeError(nativeErr)
+	}
+	if nativeErr != nil {
+		C.free(unsafe.Pointer(nativeErr))
+	}
+	return nil
+}
+
 func (s *EventKitService) Status(context.Context) Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()

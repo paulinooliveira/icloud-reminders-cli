@@ -18,6 +18,7 @@ func init() {
 		getNativeCmd,
 		addNativeCmd,
 		completeNativeCmd,
+		deleteNativeCmd,
 		statusNativeCmd,
 	)
 }

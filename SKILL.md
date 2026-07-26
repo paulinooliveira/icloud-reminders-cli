@@ -20,6 +20,7 @@ reminders show --list "mcp-canary" --limit 50
 reminders get --list "mcp-canary" <id-or-prefix>
 reminders add --list "mcp-canary" "Pumpkin 🎃" --due 2026-07-26
 reminders complete --list "mcp-canary" <id-or-prefix>
+reminders delete <id> [id...]
 reminders mcp --transport stdio
 ```
 

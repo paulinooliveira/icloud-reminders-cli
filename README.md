@@ -40,6 +40,7 @@ reminders show --list mcp-canary --limit 50
 reminders get --list mcp-canary <id-or-prefix>
 reminders add --list mcp-canary "Pumpkin 🎃"
 reminders complete --list mcp-canary <id-or-prefix>
+reminders delete <id> [id...]
 ```
 
 `show` is bounded: default 50, maximum 200, with `total_count`, `limit`,

@@ -12,5 +12,6 @@ char *reminders_eventkit_lists(reminders_eventkit_store *store, char **error_out
 char *reminders_eventkit_show(reminders_eventkit_store *store, const char *input_json, char **error_out);
 char *reminders_eventkit_add(reminders_eventkit_store *store, const char *input_json, char **error_out);
 char *reminders_eventkit_complete(reminders_eventkit_store *store, const char *identifier, char **error_out);
+int reminders_eventkit_delete(reminders_eventkit_store *store, const char *identifier, char **error_out);
 
 #endif

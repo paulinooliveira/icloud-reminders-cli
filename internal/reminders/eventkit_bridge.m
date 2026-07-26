@@ -276,3 +276,21 @@ char *reminders_eventkit_complete(reminders_eventkit_store *store, const char *i
         return json_result(reminder_dict(reminder), error_out);
     }
 }
+
+int reminders_eventkit_delete(reminders_eventkit_store *store, const char *identifier, char **error_out) {
+    @autoreleasepool {
+        if (!ensure_access(store->value, error_out)) return 0;
+        NSString *needle = [NSString stringWithUTF8String:identifier];
+        EKCalendarItem *item = [store->value calendarItemWithIdentifier:needle];
+        if (![item isKindOfClass:[EKReminder class]]) {
+            set_error(error_out, [NSString stringWithFormat:@"reminder '%@' not found", needle]);
+            return 0;
+        }
+        NSError *error = nil;
+        if (![store->value removeReminder:(EKReminder *)item commit:YES error:&error]) {
+            set_error(error_out, [NSString stringWithFormat:@"delete reminder: %@", error.localizedDescription]);
+            return 0;
+        }
+        return 1;
+    }
+}

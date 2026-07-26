@@ -18,6 +18,7 @@ type Service interface {
 	Find(context.Context, string, string) (*models.Reminder, error)
 	Add(context.Context, AddInput) (*models.Reminder, error)
 	Complete(context.Context, string) (*models.Reminder, error)
+	Delete(context.Context, string) error
 	Status(context.Context) Status
 	Close() error
 }

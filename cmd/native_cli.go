@@ -101,6 +101,20 @@ var completeNativeCmd = &cobra.Command{
 	},
 }
 
+var deleteNativeCmd = &cobra.Command{
+	Use: "delete <id>...", Short: "Delete one or more reminders through native EventKit", Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return withNativeService(cmd, func(service reminders.Service) error {
+			for _, id := range args {
+				if err := service.Delete(cmd.Context(), id); err != nil {
+					return fmt.Errorf("delete %s: %w", id, err)
+				}
+			}
+			return writeJSON(cmd, map[string]any{"deleted": len(args)})
+		})
+	},
+}
+
 var statusNativeCmd = &cobra.Command{
 	Use: "status", Short: "Report native EventKit authorization status",
 	RunE: func(cmd *cobra.Command, _ []string) error {
