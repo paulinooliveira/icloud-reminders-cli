@@ -46,6 +46,11 @@ reminders delete <id> [id...]
 `show` is bounded: default 50, maximum 200, with `total_count`, `limit`,
 `offset`, and `has_more` in every response.
 
+`delete` is deliberately local CLI-only. It accepts exact EventKit IDs, deletes
+permanently from the iCloud-backed store, and is not exposed over MCP. For bulk
+cleanup, export and review an ID manifest first, retain counts before/after, and
+follow [`docs/native-cleanup-runbook.md`](docs/native-cleanup-runbook.md).
+
 ## MCP
 
 Local stdio:
@@ -65,6 +70,15 @@ per-key list allowlists, read-only/write policy, and a dedicated tunnel. See
 - Tokens are stored only as SHA-256 hashes in a mode-0600 keys file.
 - `lists`, `show`, `get`, `add`, `complete`, and `status` are the complete MCP
   v1 surface. Destructive delete/edit/list-management tools are not exposed.
+
+## iPhone synchronization
+
+The Mac's EventKit totals are authoritative for this tool. After a large native
+deletion, iOS can temporarily show a much larger stale count while processing
+deletion tombstones. Force-quit Reminders and restart the iPhone first. If the
+count still disagrees, toggle **Settings → Apple Account → iCloud → See All →
+Reminders** off, choose **Delete from iPhone**, restart, and enable it again.
+This clears only the device cache and downloads the current iCloud state.
 
 ## Verification
 

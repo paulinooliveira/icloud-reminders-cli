@@ -16,6 +16,9 @@ layer; remote agents still authenticate only with the scoped Bearer tokens.
 - Tokens are never stored in git; only SHA-256 hashes are stored in the key file.
 - Every key must have a non-empty `lists` allowlist. `write` should remain false
   unless that agent must call `add` or `complete`.
+- Native `delete` is intentionally absent from MCP, including writer keys. Bulk
+  deletion is a supervised local operation documented in
+  [`native-cleanup-runbook.md`](native-cleanup-runbook.md).
 - This service uses its own tunnel and LaunchAgent labels. Do not add it to the
   ERPNext or Hindsight tunnel.
 

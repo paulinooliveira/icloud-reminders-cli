@@ -1,7 +1,7 @@
 ---
 title: "Secure remote iCloud Reminders: CLI + local MCP + Hindsight-pattern remote"
 date: 2026-07-25
-status: APPROVED-DIRECTION — owner wants both phases in order; token auth like Hindsight; pending build
+status: IMPLEMENTED — Phase A and Phase B shipped; native EventKit only; REM.0-REM.8 verified
 appetite: "Phase A one evening (LOCAL_GREEN). Phase B one weekend (REMOTE_GREEN). Build in order; do not skip A."
 owner: paulino (orchestrator)
 owned-scope: >
@@ -233,6 +233,21 @@ Parallel only inside a phase when scopes don’t overlap (e.g. B3 templates whil
 - Keep CLI
 - Remote is part of the plan, not a maybe
 - Native EventKit is the sole backend; the legacy private-web implementation is removed
+
+## Implementation record
+
+- Phase A shipped as the `reminders` CLI and stdio MCP over the shared native
+  EventKit service.
+- Phase B shipped as a loopback-only HTTP MCP, scoped bearer-token policy,
+  restricted localhost SSH bridge, dedicated Cloudflare Tunnel, and separate
+  LaunchAgents.
+- The legacy CloudKit/private-web authentication, cache, sync, and writer code
+  was removed. There is no web fallback.
+- Destructive reminder deletion is available only through the supervised local
+  CLI and is intentionally absent from MCP.
+- The authoritative verifier is `scripts/verify-remote-reminders.sh`; a release
+  is complete only when REM.0-REM.8 all pass on the exact clean commit being
+  published.
 
 ## Still open (small)
 

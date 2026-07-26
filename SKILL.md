@@ -27,3 +27,10 @@ reminders mcp --transport stdio
 Always specify a list for reminder reads and writes. `show` returns bounded
 pagination metadata and never silently truncates. Remote MCP clients are also
 restricted by their token's list allowlist and write permission.
+
+`delete` is destructive, accepts exact EventKit IDs, and is available only in
+the local CLI. Never infer a bulk deletion set from broad keywords alone:
+inventory all lists, save and review the exact IDs, preserve normal low-volume
+lists, delete the approved set, and verify per-list totals afterward. A stale
+iPhone count after server-side cleanup is a device-cache issue; follow the
+native cleanup runbook rather than attempting a private web fallback.
