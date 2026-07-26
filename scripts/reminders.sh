@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# iCloud Reminders CLI
-# First run: ./scripts/reminders.sh auth  (interactive 2FA setup)
+# Native Apple Reminders CLI development wrapper.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GO_BIN="$SCRIPT_DIR/reminders"
-CREDS_FILE="$HOME/.config/icloud-reminders/credentials"
-
-# Load credentials into environment
-if [[ -f "$CREDS_FILE" ]]; then
-  # shellcheck source=/dev/null
-  source "$CREDS_FILE"
-fi
-
 # Build Go binary if missing
 if [[ ! -x "$GO_BIN" ]]; then
   echo "Building Go binary..." >&2

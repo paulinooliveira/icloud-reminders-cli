@@ -170,7 +170,7 @@ as a wildcard: empty lists are rejected.
 4. Delete revoked plaintext tokens from client secret stores and disable their
    hashes in `keys.json`.
 
-The original CloudKit CLI and local stdio MCP do not depend on the tunnel and
+The native EventKit CLI and local stdio MCP do not depend on the tunnel and
 remain usable when the tunnel is stopped.
 
 ## 7. Evidence

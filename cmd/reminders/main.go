@@ -1,5 +1,4 @@
-// iCloud Reminders CLI (Go implementation)
-// Mirrors the Python implementation in ../reminders_ck.py
+// Native macOS Apple Reminders CLI and MCP server.
 package main
 
 import (

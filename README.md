@@ -1,276 +1,74 @@
----
-name: icloud-reminders
-description: Manage Apple iCloud Reminders via CloudKit API. Use for listing, adding, completing, deleting reminders, managing lists, and hierarchical subtasks. Works with 2FA-protected accounts via cached sessions.
----
+# Native Apple Reminders CLI + MCP
 
-# iCloud Reminders (Go)
+This project exposes Apple Reminders through the supported macOS EventKit
+framework. It contains no iCloud web login, Apple-ID password handling,
+reverse-engineered web client, browser session, or fallback backend.
 
-Access and manage Apple iCloud Reminders via CloudKit API. Full CRUD with hierarchical subtask support.
+The same native service powers:
 
-**Pure Go — no Python or pyicloud required.** Authentication, 2FA, session management and CloudKit API calls are all implemented natively in Go.
+- the `reminders` CLI;
+- local MCP over stdio;
+- token-authenticated remote MCP through a dedicated Cloudflare Tunnel.
 
-## Installation
+## Requirements
 
-### Homebrew (Recommended)
+- macOS with Reminders enabled in iCloud;
+- Xcode command-line tools and Go;
+- Full Access under **System Settings > Privacy & Security > Reminders**.
 
-The easiest way to install on macOS and Linux:
+## Build and install
 
 ```bash
-brew tap tarekbecker/tap
-brew install icloud-reminders
+./scripts/build.sh
+./scripts/install-mcp-runtime.sh install
 ```
 
-Upgrade to the latest version:
+If macOS has not authorized the installed app yet:
+
 ```bash
-brew upgrade icloud-reminders
+./scripts/install-mcp-runtime.sh authorize
 ```
 
-### Install Script
+## CLI
 
-One-line install for any platform:
-
-```bash
-curl -sL https://github.com/tarekbecker/icloud-reminders-cli/releases/latest/download/install.sh | bash
-```
-
-### Pre-built Binary
-
-Download manually for your platform from [GitHub Releases](https://github.com/tarekbecker/icloud-reminders-cli/releases).
-
-### Build from Source
-
-Requires Go 1.25+ (required by the official MCP Go SDK):
+All data commands use in-process EventKit and emit JSON.
 
 ```bash
-bash scripts/build.sh
-sudo cp go/reminders /usr/local/bin/
-```
-
-## Setup
-
-1. **Authenticate** (interactive — required on first run):
-   ```bash
-   reminders auth
-   ```
-   
-   Credentials are resolved in this order:
-   1. `ICLOUD_USERNAME` / `ICLOUD_PASSWORD` environment variables
-   2. `~/.config/icloud-reminders/credentials` file (export KEY=value format)
-   3. Interactive prompt (fallback)
-
-2. **Session file** (`~/.config/icloud-reminders/session.json`) is created automatically and reused. Run `reminders auth` again when the session expires.
-
-## Commands
-
-```bash
-# First-time setup / force re-auth
-reminders auth
-reminders auth --force
-
-# List all active reminders (hierarchical)
-reminders list
-
-# Filter by list name
-reminders list -l "🛒 Einkauf"
-
-# Include completed
-reminders list --all
-
-# Search by title
-reminders search "milk"
-
-# Show all lists
+reminders status
 reminders lists
-
-# Create a new list
-reminders create-list "Sebastian"
-
-# Ensure a top-level anchor reminder exists
-reminders ensure-parent "explorer" -l "Sebastian"
-
-# Ensure a native section exists
-reminders ensure-section "DK" -l "Belo"
-
-# Rename or delete a native section
-reminders rename-section "DK" -l "Belo" --name "Davidson Kempner"
-reminders delete-section "Davidson Kempner" -l "Belo"
-
-# Move reminders into or out of a section
-reminders set-section ABC123 -l "Belo" --section "DK"
-reminders set-section ABC123 -l "Belo" --clear
-
-# Show live sections, including empty ones the CLI created
-reminders sections -l "Sebastian"
-
-# Inspect the raw CloudKit record for a reminder
-reminders inspect "Section test B1" -l "Sebastian"
-
-# Add reminder
-reminders add "Buy milk" -l "Einkauf"
-reminders add "Buy milk" -l "4400A74B-9D82-4F9D-8CB8-392C72BF856A"  # list id also works
-reminders add "Review calendar gaps" -l "Sebastian" --parent "explorer"
-reminders add "Review calendar gaps" -l "Sebastian" --tag explorer
-
-# Add with due date and priority
-reminders add "Call mom" --due 2026-02-25 --priority high
-
-# Add with notes
-reminders add "Buy milk" -l "Einkauf" --notes "Get the organic 2% stuff"
-
-# Add as subtask
-reminders add "Butter" --parent ABC123
-
-# Add multiple at once (batch)
-reminders add-batch "Butter" "Käse" "Milch" -l "Einkauf"
-
-# Edit a reminder (update title, due date, notes, priority, parent, or flagged state)
-reminders edit abc123 --title "New title"
-reminders edit abc123 --due 2026-03-01T16:30 --priority high
-reminders edit abc123 --notes "Updated notes"
-reminders edit abc123 --priority none
-reminders edit abc123 --flagged
-reminders edit abc123 --unflagged
-
-# Set or clear native Apple Reminders tags
-reminders set-tags abc123 --tag p-manager
-reminders set-tags abc123 --clear
-
-# Complete reminder
-reminders complete abc123
-
-# Delete reminder
-reminders delete abc123
-
-# Export as JSON
-reminders json
-
-# Force full resync
-reminders sync
-
-# Export session cookies (share without password)
-reminders export-session session.tar.gz
-
-# Import session from export
-reminders import-session session.tar.gz
+reminders show --list mcp-canary --limit 50
+reminders get --list mcp-canary <id-or-prefix>
+reminders add --list mcp-canary "Pumpkin 🎃"
+reminders complete --list mcp-canary <id-or-prefix>
 ```
 
-## Session Management
+`show` is bounded: default 50, maximum 200, with `total_count`, `limit`,
+`offset`, and `has_more` in every response.
 
-The binary handles sessions automatically:
+## MCP
 
-- **On each run:** tries `accountLogin` with saved cookies to get a fresh CloudKit URL
-- **On failure / first run:** triggers full interactive signin + 2FA
-- **Trust token:** saved after 2FA so subsequent logins don't require a code
-- **Session file:** `~/.config/icloud-reminders/session.json`
-
-## Output Format
-
-```
-✅ Reminders: 101 (101 active)
-
-📋 Shopping (12)
-  • Supermarket  (ABC123DE)
-    • Butter  (FGH456IJ)
-    • Cheese  (KLM789NO)
-  • Drugstore  (PQR012ST)
-    • Baking paper  (UVW345XY)
-```
-
-Full record IDs in parentheses — use for `complete`, `delete`, `--parent`. Prefix matching is supported (pass the first few characters).
-
-## Cache & Sync
-
-- **Cache:** `~/.config/icloud-reminders/ck_cache.json` (same JSON format as Python version — shared/compatible)
-- **Delta sync:** Fast incremental updates (default)
-- **Full sync:** `reminders sync` — can take ~2 min for large accounts
-
-## Architecture
-
-```
-scripts/
-├── reminders.sh            # Dev wrapper (auto-builds + loads creds)
-├── build.sh                # Build script
-└── reminders               # Compiled Go binary (generated)
-
-go/
-├── main.go                 # Entry point
-├── auth/auth.go            # Native iCloud auth (signin, 2FA, trust, accountLogin)
-├── cloudkit/client.go      # CloudKit HTTP API client
-├── sync/sync.go            # Delta sync engine
-├── writer/writer.go        # Write ops (add/complete/delete)
-├── cache/cache.go          # Local JSON cache
-├── models/models.go        # Data types
-├── utils/utils.go          # CRDT title encoding, timestamps
-└── cmd/                    # Cobra CLI commands
-    ├── auth.go             # reminders auth
-    ├── list.go             # reminders list
-    ├── add.go              # reminders add / add-batch
-    └── ...
-```
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| "not authenticated" | Run `reminders auth` |
-| "invalid Apple ID or password" | Re-run `reminders auth --force` |
-| "2FA failed" | Re-run `auth`, enter a fresh code |
-| "Missing change tag" | Run `reminders sync` |
-| "List not found" | Check name with `reminders lists` |
-| Binary not found | Run `bash scripts/build.sh` or check your PATH |
-
-## See Also
-
-- [Homebrew Tap Setup](HOMEBREW.md) — maintainer documentation
-
-## MCP access for agents
-
-The existing CloudKit CLI remains supported. A separate, narrow MCP surface uses
-the Mac's in-process EventKit access so local and remote agents do not
-receive iCloud credentials.
-
-### Local stdio MCP
-
-Build the binary, authorize Reminders, then point an MCP client at the command:
+Local stdio:
 
 ```bash
-go build -o ./scripts/reminders ./cmd/reminders
-go run ./cmd/reminders-mcp-probe --transport stdio \
-  --binary "$HOME/Applications/Reminders MCP.app/Contents/MacOS/reminders" --tool status
-./scripts/reminders mcp --transport stdio
+reminders mcp --transport stdio
 ```
 
-Codex/Claude-style client configuration:
+Remote deployment uses a loopback HTTP origin, bearer-token hashes at rest,
+per-key list allowlists, read-only/write policy, and a dedicated tunnel. See
+[`docs/remote-mcp-runbook.md`](docs/remote-mcp-runbook.md).
 
-```json
-{
-  "mcpServers": {
-    "icloud-reminders": {
-      "command": "/absolute/path/to/reminders",
-      "args": ["mcp", "--transport", "stdio"]
-    }
-  }
-}
+## Security boundary
+
+- Native EventKit is the only reminders backend.
+- The remote origin binds to `127.0.0.1`.
+- Tokens are stored only as SHA-256 hashes in a mode-0600 keys file.
+- `lists`, `show`, `get`, `add`, `complete`, and `status` are the complete MCP
+  v1 surface. Destructive delete/edit/list-management tools are not exposed.
+
+## Verification
+
+```bash
+go test ./...
+./scripts/install-mcp-runtime.sh --check
+./scripts/verify-remote-reminders.sh
 ```
-
-Available tools are deliberately small: `lists`, `show`, `get`, `add`,
-`complete`, and `status`. `show` requires an explicit list and returns
-`total_count`, `limit`, `offset`, and `has_more`; the default page is 50 and the
-maximum is 200. EventKit still reads the complete selected list before
-the response is sliced, so very large lists can take several seconds.
-
-### Remote MCP
-
-Remote access is Streamable HTTP on a loopback-only origin. Every client gets a
-Bearer token whose SHA-256 hash, list allowlist, and write permission live in a
-mode-0600 key file. Keys default to read-only by configuration; writes require
-`"write": true`. A dedicated Cloudflare Tunnel publishes only `/mcp` and never
-shares the ERPNext or Hindsight tunnel.
-
-On macOS, the LaunchAgent uses a dedicated localhost-only, forced-command SSH
-key to enter the authorized Reminders TCC context. That key cannot provide a
-shell, TTY, port forwarding, or agent forwarding; remote clients still
-authenticate only with their scoped Bearer tokens.
-
-See [the remote runbook](docs/remote-mcp-runbook.md) for key generation,
-LaunchAgent/tunnel installation, verification, revocation, and rollback.

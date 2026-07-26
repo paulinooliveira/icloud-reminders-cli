@@ -11,12 +11,12 @@ review:
   method: b-plan-review panel — [zen], [clean]+[leverage], architecture/failure/test, mandatory adversarial
   disposition: unanimous SHIP-WITH-CHANGES; owner then locked full A→B sequence with bearer-token remote
   empirical_probe_2026-07-25: |
-    remindctl list --json ≈ 7.2s; show open --list Belo --json ≈ 7.3s / ~5.7MB / 12460 items.
-    No server-side limit in remindctl 0.2.0 — caps are response-side; large-list calls stay slow.
+    The first prototype exposed large-list fetch cost. The final implementation
+    uses in-process EventKit with bounded responses and a native fetch timeout.
 decisions-locked:
   sequence: Phase A (LOCAL_GREEN) then Phase B (REMOTE_GREEN). Both are in scope; A must ship before B.
   goal: agents (local + other devices) get stable access; bearer token auth is enough (Hindsight-style)
-  origin_host: Mac with EventKit/Reminders auth via remindctl
+  origin_host: Mac with native in-process EventKit/Reminders authorization
   surfaces: CLI + stdio MCP (A); loopback HTTP MCP + token edge + dedicated CF Tunnel (B)
   transport_auth: per-client Bearer tokens, hashed at rest, revoke by keys-file reload — same idea as Hindsight
   no_oauth_sso: interactive CF Access SSO not required; token is the primary remote auth
@@ -25,7 +25,7 @@ decisions-locked:
   cli_preservation: one CLI entrypoint; absorb scripts/reminders.sh; no dual wrappers
   tool_surface_v1: lists, show, add, complete, get, status — edit/delete/list-mgmt NOT IN v1
   response_contract: list/show always return limit + total_count + has_more; never silent truncation
-  subprocess_bounds: timeout + structured errors; resolve remindctl via PATH (fallback /usr/local/bin)
+  native_bounds: EventKit authorization/fetch timeout + structured errors; no subprocess or web fallback
   tunnel: dedicated CF tunnel/LaunchAgent — never share ERP or Hindsight cloudflared
   package_default: package/cli name `reminders` unless owner renames later
 decisions-open:
@@ -39,7 +39,7 @@ decisions-open:
 
 ## Problem and bet
 
-Today the repo is a one-file `remindctl` shim. Agents need:
+Agents need:
 
 1. A real **CLI** (keep).
 2. A stable **MCP** surface.
@@ -70,7 +70,7 @@ Stop triggers:
 
 | Asset | Reuse |
 |---|---|
-| `remindctl` 0.2.0 | backend |
+| macOS EventKit | native in-process backend |
 | `scripts/reminders.sh` | absorb into CLI |
 | Hindsight keys + auth-edge + dedicated tunnel + verifier | **pattern** (token, hash, loopback, canary DNS, fail-closed gates) |
 | `belo.re` CF account/zone | new **dedicated** tunnel only |
@@ -80,7 +80,7 @@ Stop triggers:
 ```
 PHASE A — local agents
   reminders CLI  ──┐
-  stdio MCP      ──┴──► RemindersService ──► remindctl ──► Apple Reminders
+  stdio MCP      ──┴──► RemindersService ──► EventKit ──► Apple Reminders
 
 PHASE B — remote agents (after A is green)
   agent + Bearer token
@@ -102,7 +102,7 @@ PHASE B — remote agents (after A is green)
 **Phase A**
 
 - `pyproject.toml`, `src/`, tests, README, `.gitignore`
-- `RemindersService` over `remindctl` (timeouts, caps, `has_more`)
+- `RemindersService` over native EventKit (timeouts, caps, `has_more`)
 - CLI entry replacing shim
 - stdio MCP, narrow tools
 - client config examples (Codex/Claude/Hermes local)
@@ -118,7 +118,7 @@ PHASE B — remote agents (after A is green)
 
 ### NOT IN
 
-- Raw EventKit rewrite; Linux origin; multi-Mac HA
+- Linux origin; multi-Mac HA
 - Shared tunnel with ERP/Hindsight
 - Interactive SSO as primary
 - edit/delete/list-mgmt in v1
@@ -152,7 +152,7 @@ Hard rules:
 |---|---|---|
 | A0 package+service+CLI | `pyproject`, `src/icloud_reminders/{service,cli}`, retire dual shim | — |
 | A1 stdio MCP | MCP tools + local client examples | A0 |
-| A2 tests | fake remindctl; timeout; truncation metadata; write policy object; legacy CLI snapshot | A0/A1 |
+| A2 tests | EventKit boundary; timeout; truncation metadata; write policy object; CLI snapshot | A0/A1 |
 | A3 docs local | README: install, authorize, CLI, stdio MCP | A2 |
 
 **Exit A:** REM.0–REM.3 green. Local agents usable. Then start B.
@@ -190,8 +190,8 @@ Fail-closed. Skip = FAIL.
 
 | Failure | Handle |
 |---|---|
-| remindctl hang / TCC | subprocess timeout + clear error |
-| huge list latency (~7s Belo) | require list filter; small default limit; document residual slowness |
+| EventKit fetch hang / TCC | native timeout + clear error |
+| huge list latency | require list filter; small response limit; document residual fetch cost |
 | token stolen | revoke hash line + reload |
 | write on read-only key | deny at auth edge by tool name |
 | wrong list on key | deny via `lists[]` |
@@ -232,6 +232,7 @@ Parallel only inside a phase when scopes don’t overlap (e.g. B3 templates whil
 - **Token auth like Hindsight is enough**
 - Keep CLI
 - Remote is part of the plan, not a maybe
+- Native EventKit is the sole backend; the legacy private-web implementation is removed
 
 ## Still open (small)
 

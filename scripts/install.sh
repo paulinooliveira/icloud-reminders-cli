@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install script for icloud-reminders
-# Usage: curl -sL https://github.com/tarekbecker/icloud-reminders-cli/releases/latest/download/install.sh | bash
+# Installs a prebuilt native macOS EventKit binary.
 
 set -e
 
@@ -19,7 +19,7 @@ case "$ARCH" in
 esac
 
 case "$OS" in
-    linux|darwin) ;;  # supported
+    darwin) ;;
     *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
@@ -44,6 +44,4 @@ chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
 echo "✅ Installed: $(${INSTALL_DIR}/${BINARY_NAME} --version 2>/dev/null || echo '${BINARY_NAME}')"
 echo ""
-echo "Next steps:"
-echo "1. Create credentials file: ~/.config/icloud-reminders/credentials"
-echo "2. Run: reminders auth"
+echo "Next step: grant the binary Full Access in System Settings > Privacy & Security > Reminders"

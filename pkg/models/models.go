@@ -65,7 +65,7 @@ type ReminderList struct {
 	Name string `json:"name"`
 }
 
-// PriorityMap maps string priority names to CloudKit integer values.
+// PriorityMap maps user-facing priority names to EventKit integer values.
 var PriorityMap = map[string]int{
 	"high":   1,
 	"medium": 5,
